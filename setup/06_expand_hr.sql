@@ -9,6 +9,8 @@ USE SCHEMA HR;
 USE WAREHOUSE BI_ASSISTANT_WH;
 
 -- ── DEPARTMENTS (expand to 10) ─────────────────────────────
+-- CREATE OR REPLACE resets AUTOINCREMENT to 1..N each run so that child FKs
+-- (EMPLOYEES.DEPT_ID, EXPENSES.DEPT_ID, etc.) populated via UNIFORM(1,N) resolve.
 CREATE OR REPLACE TABLE DEPARTMENTS (
     DEPT_ID         INT AUTOINCREMENT PRIMARY KEY,
     DEPT_NAME       VARCHAR(100) NOT NULL,

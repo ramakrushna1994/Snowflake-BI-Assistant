@@ -205,7 +205,7 @@ if ask_clicked and question.strip():
         # Confidence scoring
         try:
             with st.spinner("Scoring confidence..."):
-                scores = score_sql(session, question, generated_sql, schema_context, known_identifiers)
+                scores = score_sql(session, question, generated_sql, known_identifiers)
             render_confidence(scores)
         except Exception as e:
             st.warning(f"Confidence scoring unavailable: {e}")
