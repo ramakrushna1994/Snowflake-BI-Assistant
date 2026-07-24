@@ -35,8 +35,10 @@ with st.sidebar:
     ]
     for ex in examples:
         if st.button(ex, key=f"ex_{ex}"):
+            # Set the widget value; the natural button-click rerun picks it up.
+            # Do NOT call st.experimental_rerun() here — in SiS it fires before
+            # the session-state write is committed and silently drops the value.
             st.session_state["question_input"] = ex
-            st.experimental_rerun()
 
     st.divider()
     st.subheader("Semantic Views")
