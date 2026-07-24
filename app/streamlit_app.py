@@ -36,7 +36,7 @@ with st.sidebar:
     for ex in examples:
         if st.button(ex, key=f"ex_{ex}"):
             st.session_state["question_input"] = ex
-            st.rerun()
+            st.experimental_rerun()
 
     st.divider()
     st.subheader("Semantic Views")
