@@ -45,11 +45,16 @@ with st.sidebar:
 
     st.divider()
     if st.button("Refresh Schema"):
-        st.session_state.pop("schema_context", None)
-        st.session_state.pop("schema_table", None)
-        st.session_state.pop("known_identifiers", None)
+        for key in ["schema_context", "schema_table", "known_identifiers", "history", "errors", "session"]:
+            st.session_state.pop(key, None)
+        st.experimental_rerun()
     if "schema_table" in st.session_state:
         st.dataframe(st.session_state["schema_table"], use_container_width=True)
+
+    if st.session_state.get("errors"):
+        with st.expander(f"⚠️ {len(st.session_state['errors'])} routing error(s)"):
+            for err in st.session_state["errors"]:
+                st.caption(err)
 
 
 # ── Input ─────────────────────────────────────────────────────────────────────
@@ -94,8 +99,19 @@ def render_chart(df):
     non_numeric = [c for c in df.columns if c not in numeric_cols]
     try:
         if non_numeric and len(df) > 1:
-            chart_df = df.groupby(non_numeric[0])[numeric_cols[:2]].sum().reset_index()
-            st.bar_chart(chart_df.set_index(non_numeric[0]))
+            first_col = df[non_numeric[0]]
+            is_temporal = (
+                pd.api.types.is_datetime64_any_dtype(first_col) or
+                non_numeric[0].upper() in ("MONTH", "MONTH_LABEL", "PAY_MONTH",
+                                            "REVENUE_MONTH", "BUDGET_PERIOD",
+                                            "ORDER_MONTH", "RETURN_MONTH",
+                                            "EXPENSE_MONTH", "INVOICE_MONTH")
+            )
+            chart_df = df.groupby(non_numeric[0])[numeric_cols[:2]].sum()
+            if is_temporal or len(chart_df) > 12:
+                st.line_chart(chart_df)
+            else:
+                st.bar_chart(chart_df)
         elif len(df) > 1:
             st.line_chart(df[numeric_cols[:2]])
     except Exception:
@@ -213,7 +229,8 @@ if ask_clicked and question.strip():
     try:
         with st.spinner("Generating summary..."):
             results_str = df.head(20).to_string(index=False)
-            summary_prompt = build_summary_prompt(question, results_str)
+            col_info = ", ".join(df.columns.tolist())
+            summary_prompt = build_summary_prompt(question, results_str, col_info=col_info)
             sp_escaped = summary_prompt.replace("'", "''")
             summary = session.sql(
                 f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{CORTEX_MODEL}', '{sp_escaped}') AS R"

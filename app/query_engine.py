@@ -126,6 +126,17 @@ def generate_sql(session, question, schema_context, semantic_views, history=None
     if raw.upper().lstrip().startswith(("SELECT", "WITH")):
         return {"type": "sql", "value": raw, "confidence": None, "error": None}
 
+    # Fallback: parse plain-text view response (e.g. "VIEW_NAME | HIGH" or "VIEW_NAME\nCONFIDENCE: HIGH")
+    lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
+    if lines:
+        view_candidate = lines[0].split("|")[0].strip()
+        confidence = "HIGH"
+        for line in lines:
+            if "LOW" in line.upper():
+                confidence = "LOW"
+        if view_candidate in semantic_views and confidence == "HIGH":
+            return {"type": "view", "value": view_candidate, "confidence": "HIGH", "error": None}
+
     return {"type": "sql", "value": raw, "confidence": None, "error": "Could not parse LLM response"}
 
 
