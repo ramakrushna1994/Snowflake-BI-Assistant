@@ -169,8 +169,7 @@ if ask_clicked and question.strip():
                     st.caption(h["summary"][:200])
 
     st.markdown("---")
-    st.markdown("**Q:**")
-    st.write(question)
+    st.markdown(f"**Q:** {question}")
 
     # Step 1: Single LLM call — route to semantic view or generate SQL
     try:
