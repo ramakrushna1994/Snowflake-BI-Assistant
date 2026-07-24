@@ -144,19 +144,30 @@ Navigate to **Snowsight → Streamlit → CONVERSATIONAL_BI.APP.CONVERSATIONAL_B
 
 ## CI/CD — Automatic Deployment
 
-This project uses **GitHub Actions** to auto-deploy the Streamlit app to Snowflake on every push to `main` that touches the `app/` directory.
+This project uses **GitHub Actions** for automated deployments to Snowflake.
 
-**How it works:**
-1. Push code to `main` (or merge a feature branch)
-2. GitHub Actions runs `.github/workflows/deploy-streamlit.yml`
-3. Snow CLI uploads `streamlit_app.py`, `prompts.py`, and `query_engine.py` to `@CONVERSATIONAL_BI.APP.STREAMLIT_STAGE`
-4. The Streamlit app picks up the new files on next load
+### Streamlit App (`app/`)
+- **Trigger:** Push to `main` that changes files in `app/`
+- **Workflow:** `.github/workflows/deploy-streamlit.yml`
+- **Action:** Automatically uploads all app files to `@CONVERSATIONAL_BI.APP.STREAMLIT_STAGE`
+- **Approval:** None required (safe — only uploads Python files)
 
-**Required GitHub Secrets** (Settings → Secrets → Actions):
-| Secret | Value |
-|--------|-------|
-| `SNOWFLAKE_ACCOUNT` | Your Snowflake account identifier |
-| `SNOWFLAKE_PASSWORD` | Password for the deploying user |
+### Setup Scripts (`setup/`)
+- **Trigger:** Push to `main` that changes files in `setup/`
+- **Workflow:** `.github/workflows/deploy-setup.yml`
+- **Action:** Executes only the changed SQL scripts against Snowflake
+- **Approval:** Requires manual approval in the `production` environment before executing (since scripts contain DDL/DML)
+
+**Setup required:**
+1. Add GitHub Secrets (Settings → Secrets → Actions):
+   | Secret | Value |
+   |--------|-------|
+   | `SNOWFLAKE_ACCOUNT` | Your Snowflake account identifier |
+   | `SNOWFLAKE_PASSWORD` | Password for the deploying user |
+
+2. Create a GitHub Environment called `production` (Settings → Environments → New environment):
+   - Enable "Required reviewers" and add yourself as a reviewer
+   - This gates setup script execution behind manual approval
 
 ---
 
@@ -203,7 +214,8 @@ This project uses **GitHub Actions** to auto-deploy the Streamlit app to Snowfla
 Snowflake-BI-Assistant/
 ├── .github/
 │   └── workflows/
-│       └── deploy-streamlit.yml  # CI/CD: auto-deploy on push to main
+│       ├── deploy-streamlit.yml  # CI/CD: auto-deploy app on push to main
+│       └── deploy-setup.yml      # CI/CD: run changed SQL scripts (with approval)
 ├── app/
 │   ├── streamlit_app.py        # UI shell — layout, session state, rendering
 │   ├── prompts.py              # All prompt-builder functions
