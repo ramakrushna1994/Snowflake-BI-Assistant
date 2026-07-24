@@ -142,6 +142,24 @@ Navigate to **Snowsight → Streamlit → CONVERSATIONAL_BI.APP.CONVERSATIONAL_B
 
 ---
 
+## CI/CD — Automatic Deployment
+
+This project uses **GitHub Actions** to auto-deploy the Streamlit app to Snowflake on every push to `main` that touches the `app/` directory.
+
+**How it works:**
+1. Push code to `main` (or merge a feature branch)
+2. GitHub Actions runs `.github/workflows/deploy-streamlit.yml`
+3. Snow CLI uploads `streamlit_app.py`, `prompts.py`, and `query_engine.py` to `@CONVERSATIONAL_BI.APP.STREAMLIT_STAGE`
+4. The Streamlit app picks up the new files on next load
+
+**Required GitHub Secrets** (Settings → Secrets → Actions):
+| Secret | Value |
+|--------|-------|
+| `SNOWFLAKE_ACCOUNT` | Your Snowflake account identifier |
+| `SNOWFLAKE_PASSWORD` | Password for the deploying user |
+
+---
+
 ## Example Questions
 
 **Sales**
@@ -172,6 +190,7 @@ Navigate to **Snowsight → Streamlit → CONVERSATIONAL_BI.APP.CONVERSATIONAL_B
 | Database | Snowflake |
 | LLM | Snowflake Cortex (`mistral-large2`) |
 | UI | Streamlit in Snowflake |
+| CI/CD | GitHub Actions + Snow CLI |
 | Schema Discovery | `INFORMATION_SCHEMA.COLUMNS` |
 | Data Generation | Snowflake `TABLE(GENERATOR())` |
 | Version Control | Git / GitHub |
@@ -182,6 +201,9 @@ Navigate to **Snowsight → Streamlit → CONVERSATIONAL_BI.APP.CONVERSATIONAL_B
 
 ```
 Snowflake-BI-Assistant/
+├── .github/
+│   └── workflows/
+│       └── deploy-streamlit.yml  # CI/CD: auto-deploy on push to main
 ├── app/
 │   ├── streamlit_app.py        # UI shell — layout, session state, rendering
 │   ├── prompts.py              # All prompt-builder functions

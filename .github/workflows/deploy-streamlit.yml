@@ -1,0 +1,44 @@
+name: Deploy Streamlit to Snowflake
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Snow CLI
+        uses: Snowflake-Labs/snowflake-cli-action@v1
+        with:
+          cli-version: "latest"
+          default-config-file-path: "config.toml"
+
+      - name: Create Snow CLI config
+        run: |
+          mkdir -p ~/.snowflake
+          cat > ~/.snowflake/config.toml << 'EOF'
+          [connections.default]
+          account = "${{ secrets.SNOWFLAKE_ACCOUNT }}"
+          user = "RAMAKRUSHNA"
+          password = "${{ secrets.SNOWFLAKE_PASSWORD }}"
+          warehouse = "BI_ASSISTANT_WH"
+          database = "CONVERSATIONAL_BI"
+          schema = "APP"
+          EOF
+
+      - name: Deploy Streamlit app files
+        run: |
+          cd app
+          snow stage copy streamlit_app.py @CONVERSATIONAL_BI.APP.STREAMLIT_STAGE --overwrite --connection default
+          snow stage copy prompts.py @CONVERSATIONAL_BI.APP.STREAMLIT_STAGE --overwrite --connection default
+          snow stage copy query_engine.py @CONVERSATIONAL_BI.APP.STREAMLIT_STAGE --overwrite --connection default
+
+      - name: Verify deployment
+        run: |
+          snow sql -q "LIST @CONVERSATIONAL_BI.APP.STREAMLIT_STAGE" --connection default
