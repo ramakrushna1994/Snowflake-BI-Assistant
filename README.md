@@ -76,6 +76,27 @@ Pre-aggregated views that bypass SQL generation for common question patterns:
 | `FINANCE.V_EXPENSE_SUMMARY` | Expenses by category, vendor, approval rate |
 | `FINANCE.V_INVOICE_AGING` | Outstanding invoices, aging buckets, days to pay |
 
+### Data Correctness & Design Notes
+
+The semantic views and seed scripts follow two rules that protect metric accuracy:
+
+- **No join fan-out.** Views that combine a header grain (orders, products, customers)
+  with a detail grain (order items, returns) pre-aggregate each child in its own CTE
+  before joining. This prevents one-to-many joins from multiplying `SUM`/`AVG` measures
+  (e.g. revenue inflated by the number of returns). Applies to `V_MONTHLY_REVENUE`,
+  `V_PRODUCT_PERFORMANCE`, `V_CUSTOMER_SEGMENTS`, and `V_CHANNEL_PERFORMANCE`.
+- **Deterministic identities for referential integrity.** Fact/dimension tables use
+  `CREATE OR REPLACE TABLE`, which resets each `AUTOINCREMENT` primary key to `1..N` on
+  every run. Child foreign keys are seeded with `UNIFORM(1, N)`, so they only resolve if
+  parent IDs start at 1. (Using `TRUNCATE` instead does **not** reset the identity
+  sequence in Snowflake — repeated runs drift the IDs past the `UNIFORM` range and silently
+  break every join.) Because the scripts are a regenerable demo seed, `CREATE OR REPLACE`
+  is both idempotent and correct.
+- **Internally consistent amounts.** Derived money columns are computed, not randomised:
+  `ORDER_ITEMS.LINE_TOTAL = QTY × PRICE × (1 − discount)`,
+  `INVOICES.TOTAL_DUE = INVOICE_AMOUNT + TAX_AMOUNT`, and `PAID_AMOUNT`/status/payment-date
+  are mutually consistent (no negative balances or overpayments).
+
 ---
 
 ## Setup & Deployment

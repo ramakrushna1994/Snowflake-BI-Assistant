@@ -15,25 +15,67 @@ USE SCHEMA SALES;
 
 -- V_MONTHLY_REVENUE
 -- Answers: monthly revenue trend, revenue by month/year
+-- NOTE: order-grain measures (order count, AOV) are computed separately from
+--       line-item measures to avoid fan-out from the ORDERS->ORDER_ITEMS join.
 CREATE OR REPLACE VIEW V_MONTHLY_REVENUE AS
+WITH line_items AS (
+    SELECT
+        DATE_TRUNC('MONTH', o.ORDER_DATE)          AS REVENUE_MONTH,
+        TO_CHAR(o.ORDER_DATE, 'YYYY-MM')           AS MONTH_LABEL,
+        SUM(oi.QUANTITY * oi.UNIT_PRICE)           AS GROSS_REVENUE,
+        SUM(oi.DISCOUNT_PCT / 100 * oi.UNIT_PRICE * oi.QUANTITY) AS TOTAL_DISCOUNTS,
+        SUM(oi.LINE_TOTAL)                         AS NET_REVENUE
+    FROM ORDERS o
+    JOIN ORDER_ITEMS oi ON o.ORDER_ID = oi.ORDER_ID
+    WHERE o.STATUS != 'Cancelled'
+    GROUP BY 1, 2
+),
+orders_agg AS (
+    SELECT
+        DATE_TRUNC('MONTH', ORDER_DATE)            AS REVENUE_MONTH,
+        COUNT(DISTINCT ORDER_ID)                   AS TOTAL_ORDERS,
+        COUNT(DISTINCT CUSTOMER_ID)                AS UNIQUE_CUSTOMERS,
+        AVG(TOTAL_AMOUNT)                          AS AVG_ORDER_VALUE
+    FROM ORDERS
+    WHERE STATUS != 'Cancelled'
+    GROUP BY 1
+)
 SELECT
-    DATE_TRUNC('MONTH', o.ORDER_DATE)         AS REVENUE_MONTH,
-    TO_CHAR(o.ORDER_DATE, 'YYYY-MM')          AS MONTH_LABEL,
-    COUNT(DISTINCT o.ORDER_ID)                AS TOTAL_ORDERS,
-    COUNT(DISTINCT o.CUSTOMER_ID)             AS UNIQUE_CUSTOMERS,
-    SUM(oi.QUANTITY * oi.UNIT_PRICE)          AS GROSS_REVENUE,
-    SUM(oi.DISCOUNT_PCT / 100 * oi.UNIT_PRICE * oi.QUANTITY) AS TOTAL_DISCOUNTS,
-    SUM(oi.LINE_TOTAL)                        AS NET_REVENUE,
-    AVG(o.TOTAL_AMOUNT)                       AS AVG_ORDER_VALUE
-FROM ORDERS o
-JOIN ORDER_ITEMS oi ON o.ORDER_ID = oi.ORDER_ID
-WHERE o.STATUS != 'Cancelled'
-GROUP BY 1, 2
-ORDER BY 1;
+    li.REVENUE_MONTH,
+    li.MONTH_LABEL,
+    oa.TOTAL_ORDERS,
+    oa.UNIQUE_CUSTOMERS,
+    li.GROSS_REVENUE,
+    li.TOTAL_DISCOUNTS,
+    li.NET_REVENUE,
+    oa.AVG_ORDER_VALUE
+FROM line_items li
+JOIN orders_agg oa ON li.REVENUE_MONTH = oa.REVENUE_MONTH
+ORDER BY li.REVENUE_MONTH;
 
 -- V_PRODUCT_PERFORMANCE
 -- Answers: top/bottom products, revenue by category/subcategory
+-- NOTE: order-item and return metrics are pre-aggregated separately to avoid
+--       join fan-out (a product with N line-items and M returns would otherwise
+--       produce N*M rows and inflate every SUM).
 CREATE OR REPLACE VIEW V_PRODUCT_PERFORMANCE AS
+WITH oi_agg AS (
+    SELECT
+        PRODUCT_ID,
+        COUNT(DISTINCT ORDER_ITEM_ID) AS TIMES_ORDERED,
+        SUM(QUANTITY)                 AS TOTAL_UNITS_SOLD,
+        SUM(QUANTITY * UNIT_PRICE)    AS GROSS_REVENUE,
+        SUM(LINE_TOTAL)               AS NET_REVENUE
+    FROM ORDER_ITEMS
+    GROUP BY PRODUCT_ID
+),
+ret_agg AS (
+    SELECT
+        PRODUCT_ID,
+        COUNT(DISTINCT RETURN_ID) AS TOTAL_RETURNS
+    FROM RETURNS
+    GROUP BY PRODUCT_ID
+)
 SELECT
     p.PRODUCT_ID,
     p.PRODUCT_NAME,
@@ -43,20 +85,44 @@ SELECT
     p.UNIT_COST,
     p.UNIT_PRICE - p.UNIT_COST                AS UNIT_MARGIN,
     ROUND((p.UNIT_PRICE - p.UNIT_COST) / NULLIF(p.UNIT_PRICE, 0) * 100, 2) AS MARGIN_PCT,
-    COUNT(DISTINCT oi.ORDER_ITEM_ID)           AS TIMES_ORDERED,
-    SUM(oi.QUANTITY)                           AS TOTAL_UNITS_SOLD,
-    SUM(oi.QUANTITY * oi.UNIT_PRICE)           AS GROSS_REVENUE,
-    SUM(oi.LINE_TOTAL)                         AS NET_REVENUE,
-    COUNT(DISTINCT r.RETURN_ID)                AS TOTAL_RETURNS,
-    ROUND(COUNT(DISTINCT r.RETURN_ID) / NULLIF(SUM(oi.QUANTITY), 0) * 100, 2) AS RETURN_RATE_PCT
+    COALESCE(oi.TIMES_ORDERED, 0)             AS TIMES_ORDERED,
+    COALESCE(oi.TOTAL_UNITS_SOLD, 0)          AS TOTAL_UNITS_SOLD,
+    COALESCE(oi.GROSS_REVENUE, 0)             AS GROSS_REVENUE,
+    COALESCE(oi.NET_REVENUE, 0)               AS NET_REVENUE,
+    COALESCE(r.TOTAL_RETURNS, 0)              AS TOTAL_RETURNS,
+    ROUND(COALESCE(r.TOTAL_RETURNS, 0) / NULLIF(oi.TOTAL_UNITS_SOLD, 0) * 100, 2) AS RETURN_RATE_PCT
 FROM PRODUCTS p
-LEFT JOIN ORDER_ITEMS oi ON p.PRODUCT_ID = oi.PRODUCT_ID
-LEFT JOIN RETURNS r      ON p.PRODUCT_ID = r.PRODUCT_ID
-GROUP BY 1, 2, 3, 4, 5, 6;
+LEFT JOIN oi_agg oi ON p.PRODUCT_ID = oi.PRODUCT_ID
+LEFT JOIN ret_agg r ON p.PRODUCT_ID = r.PRODUCT_ID;
 
 -- V_CUSTOMER_SEGMENTS
 -- Answers: revenue by region/segment, top customers, customer LTV
+-- NOTE: order-item revenue and returns are pre-aggregated per customer to avoid
+--       fan-out from the ORDERS->ORDER_ITEMS->RETURNS one-to-many joins.
 CREATE OR REPLACE VIEW V_CUSTOMER_SEGMENTS AS
+WITH order_rev AS (
+    SELECT
+        o.CUSTOMER_ID,
+        COUNT(DISTINCT o.ORDER_ID)   AS TOTAL_ORDERS,
+        SUM(oi.LINE_TOTAL)           AS LIFETIME_VALUE,
+        MAX(o.ORDER_DATE)            AS LAST_ORDER_DATE
+    FROM ORDERS o
+    JOIN ORDER_ITEMS oi ON o.ORDER_ID = oi.ORDER_ID
+    WHERE o.STATUS != 'Cancelled'
+    GROUP BY o.CUSTOMER_ID
+),
+order_aov AS (
+    SELECT CUSTOMER_ID, AVG(TOTAL_AMOUNT) AS AVG_ORDER_VALUE
+    FROM ORDERS
+    WHERE STATUS != 'Cancelled'
+    GROUP BY CUSTOMER_ID
+),
+cust_returns AS (
+    SELECT o.CUSTOMER_ID, COUNT(DISTINCT r.RETURN_ID) AS TOTAL_RETURNS
+    FROM ORDERS o
+    JOIN RETURNS r ON o.ORDER_ID = r.ORDER_ID
+    GROUP BY o.CUSTOMER_ID
+)
 SELECT
     c.CUSTOMER_ID,
     c.FIRST_NAME || ' ' || c.LAST_NAME         AS CUSTOMER_NAME,
@@ -64,19 +130,17 @@ SELECT
     c.STATE,
     c.SEGMENT,
     sc.CHANNEL_NAME                             AS ACQUISITION_CHANNEL,
-    COUNT(DISTINCT o.ORDER_ID)                  AS TOTAL_ORDERS,
-    SUM(oi.LINE_TOTAL)                          AS LIFETIME_VALUE,
-    AVG(o.TOTAL_AMOUNT)                         AS AVG_ORDER_VALUE,
-    MAX(o.ORDER_DATE)                           AS LAST_ORDER_DATE,
-    DATEDIFF('DAY', MAX(o.ORDER_DATE), CURRENT_DATE()) AS DAYS_SINCE_LAST_ORDER,
-    COUNT(DISTINCT r.RETURN_ID)                 AS TOTAL_RETURNS
+    COALESCE(orv.TOTAL_ORDERS, 0)               AS TOTAL_ORDERS,
+    COALESCE(orv.LIFETIME_VALUE, 0)             AS LIFETIME_VALUE,
+    aov.AVG_ORDER_VALUE                         AS AVG_ORDER_VALUE,
+    orv.LAST_ORDER_DATE                         AS LAST_ORDER_DATE,
+    DATEDIFF('DAY', orv.LAST_ORDER_DATE, CURRENT_DATE()) AS DAYS_SINCE_LAST_ORDER,
+    COALESCE(cr.TOTAL_RETURNS, 0)               AS TOTAL_RETURNS
 FROM CUSTOMERS c
-LEFT JOIN ORDERS o      ON c.CUSTOMER_ID = o.CUSTOMER_ID
-LEFT JOIN ORDER_ITEMS oi ON o.ORDER_ID   = oi.ORDER_ID
-LEFT JOIN RETURNS r     ON o.ORDER_ID    = r.ORDER_ID
-LEFT JOIN SALES_CHANNELS sc ON c.CHANNEL_ID = sc.CHANNEL_ID
-WHERE o.STATUS != 'Cancelled' OR o.STATUS IS NULL
-GROUP BY 1, 2, 3, 4, 5, 6;
+LEFT JOIN order_rev orv     ON c.CUSTOMER_ID = orv.CUSTOMER_ID
+LEFT JOIN order_aov aov     ON c.CUSTOMER_ID = aov.CUSTOMER_ID
+LEFT JOIN cust_returns cr   ON c.CUSTOMER_ID = cr.CUSTOMER_ID
+LEFT JOIN SALES_CHANNELS sc ON c.CHANNEL_ID  = sc.CHANNEL_ID;
 
 -- V_RETURN_ANALYSIS
 -- Answers: return rates, return reasons, returns by product/category
@@ -97,21 +161,43 @@ GROUP BY 1, 2, 3, 4, 5, 6;
 
 -- V_CHANNEL_PERFORMANCE
 -- Answers: sales by channel, channel mix, channel revenue
+-- NOTE: order-grain measures (orders, customers, AOV, discounts) are computed
+--       separately from line-item revenue to avoid ORDERS->ORDER_ITEMS fan-out.
 CREATE OR REPLACE VIEW V_CHANNEL_PERFORMANCE AS
+WITH line_rev AS (
+    SELECT
+        o.CHANNEL_ID,
+        DATE_TRUNC('MONTH', o.ORDER_DATE) AS ORDER_MONTH,
+        SUM(oi.LINE_TOTAL)                AS NET_REVENUE
+    FROM ORDERS o
+    JOIN ORDER_ITEMS oi ON o.ORDER_ID = oi.ORDER_ID
+    WHERE o.STATUS != 'Cancelled'
+    GROUP BY 1, 2
+),
+order_agg AS (
+    SELECT
+        CHANNEL_ID,
+        DATE_TRUNC('MONTH', ORDER_DATE)   AS ORDER_MONTH,
+        COUNT(DISTINCT ORDER_ID)          AS TOTAL_ORDERS,
+        COUNT(DISTINCT CUSTOMER_ID)       AS UNIQUE_CUSTOMERS,
+        AVG(TOTAL_AMOUNT)                 AS AVG_ORDER_VALUE,
+        SUM(DISCOUNT_AMOUNT)              AS TOTAL_DISCOUNTS
+    FROM ORDERS
+    WHERE STATUS != 'Cancelled'
+    GROUP BY 1, 2
+)
 SELECT
     sc.CHANNEL_NAME,
     sc.CHANNEL_TYPE,
-    DATE_TRUNC('MONTH', o.ORDER_DATE)          AS ORDER_MONTH,
-    COUNT(DISTINCT o.ORDER_ID)                 AS TOTAL_ORDERS,
-    COUNT(DISTINCT o.CUSTOMER_ID)              AS UNIQUE_CUSTOMERS,
-    SUM(oi.LINE_TOTAL)                         AS NET_REVENUE,
-    AVG(o.TOTAL_AMOUNT)                        AS AVG_ORDER_VALUE,
-    SUM(o.DISCOUNT_AMOUNT)                     AS TOTAL_DISCOUNTS
-FROM ORDERS o
-JOIN ORDER_ITEMS oi    ON o.ORDER_ID    = oi.ORDER_ID
-JOIN SALES_CHANNELS sc ON o.CHANNEL_ID = sc.CHANNEL_ID
-WHERE o.STATUS != 'Cancelled'
-GROUP BY 1, 2, 3;
+    oa.ORDER_MONTH,
+    oa.TOTAL_ORDERS,
+    oa.UNIQUE_CUSTOMERS,
+    lr.NET_REVENUE,
+    oa.AVG_ORDER_VALUE,
+    oa.TOTAL_DISCOUNTS
+FROM order_agg oa
+JOIN line_rev lr       ON oa.CHANNEL_ID = lr.CHANNEL_ID AND oa.ORDER_MONTH = lr.ORDER_MONTH
+JOIN SALES_CHANNELS sc ON oa.CHANNEL_ID = sc.CHANNEL_ID;
 
 -- ════════════════════════════════════════════════════════════
 -- HR SEMANTIC VIEWS
