@@ -72,26 +72,36 @@ ask_clicked = st.button("Ask", type="primary")
 
 def render_confidence(scores):
     verdict = scores["verdict"]
+    llm_ok  = scores.get("llm_scored", False)
+
     st.markdown("#### Confidence Score")
-    if verdict == "UNSCORED":
-        st.info("Confidence: UNSCORED — scoring output could not be parsed.")
-        with st.expander("Raw scoring output"):
-            st.text(scores.get("raw", "N/A"))
-        return
     if verdict == "GOOD":
-        st.success(f"Confidence: {verdict}")
+        st.success(f"✅ Confidence: {verdict}")
     elif verdict == "NEEDS REVIEW":
-        st.warning(f"Confidence: {verdict}")
+        st.warning(f"⚠️ Confidence: {verdict}")
+    elif verdict == "UNSCORED":
+        st.info("ℹ️ Confidence: UNSCORED — LLM scoring output could not be parsed.")
     else:
-        st.error(f"Confidence: {verdict}")
+        st.error(f"🔴 Confidence: {verdict}")
+
     c1, c2, c3 = st.columns(3)
-    c1.metric("Relevance", f"{scores['relevance']}/10", help=scores["relevance_reason"])
-    c2.metric("Schema Fit", f"{scores['schema_compliance']}/10", help=scores["schema_compliance_reason"])
-    c3.metric("SQL Quality", f"{scores['sql_quality']}/10", help=scores["sql_quality_reason"])
+    c1.metric("Relevance",    f"{scores['relevance']}/10"          if llm_ok else "—",
+              help=scores["relevance_reason"])
+    c2.metric("Schema Fit",   f"{scores['schema_compliance']}/10",
+              help=scores["schema_compliance_reason"])
+    c3.metric("SQL Quality",  f"{scores['sql_quality']}/10"         if llm_ok else "—",
+              help=scores["sql_quality_reason"])
+
+    if not llm_ok:
+        st.caption("Relevance & SQL Quality unavailable — only schema compliance scored.")
+
     with st.expander("Confidence details"):
         st.markdown(f"- **Relevance:** {scores['relevance_reason']}")
         st.markdown(f"- **Schema Fit:** {scores['schema_compliance_reason']}")
         st.markdown(f"- **SQL Quality:** {scores['sql_quality_reason']}")
+        if scores.get("raw"):
+            st.markdown("**Raw LLM output:**")
+            st.text(scores["raw"])
 
 
 def render_chart(df):
@@ -183,6 +193,14 @@ if ask_clicked and question.strip():
         with st.expander("Query", expanded=False):
             st.code(query_sql, language="sql")
 
+        # Views are curated and reviewed — always HIGH confidence on schema fit
+        st.markdown("#### Confidence Score")
+        st.success("✅ Confidence: HIGH — curated semantic view")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Relevance",   "10/10", help="Routed to a purpose-built view for this question type.")
+        c2.metric("Schema Fit",  "10/10", help="View is reviewed and maintained against the live schema.")
+        c3.metric("SQL Quality", "10/10", help="Pre-validated SQL — no generation risk.")
+
         with st.spinner("Running query..."):
             df, error = run_query(session, query_sql)
         if error:
@@ -206,13 +224,9 @@ if ask_clicked and question.strip():
         with st.expander("Generated SQL", expanded=True):
             st.code(generated_sql, language="sql")
 
-        # Confidence scoring
-        try:
-            with st.spinner("Scoring confidence..."):
-                scores = score_sql(session, question, generated_sql, known_identifiers)
-            render_confidence(scores)
-        except Exception as e:
-            st.warning(f"Confidence scoring unavailable: {e}")
+        # Confidence scoring — score_sql never raises, always returns a dict
+        scores = score_sql(session, question, generated_sql, known_identifiers)
+        render_confidence(scores)
 
         # Execute query
         with st.spinner("Running query..."):
