@@ -150,7 +150,7 @@ QUESTIONS = [
     ("COMPLEX", "Show a scorecard: for each domain (Sales/HR/Finance) list one key metric."),
 ]
 
-assert len(QUESTIONS) == 100, f"Expected 100 questions, got {len(QUESTIONS)}"
+assert len(QUESTIONS) >= 100, f"Expected at least 100 questions, got {len(QUESTIONS)}"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -274,7 +274,7 @@ def run_tests():
         sys.exit(1)
 
     print(f"\n{'='*70}")
-    print(f"  DataForge 100-Question Test  —  {datetime.now():%Y-%m-%d %H:%M}")
+    print(f"  DataForge {len(active_questions)}-Question Test  —  {datetime.now():%Y-%m-%d %H:%M}")
     print(f"  Account: {ACCOUNT}   Model: {MODEL}")
     print(f"{'='*70}\n")
 
