@@ -14,6 +14,8 @@ SEMANTIC_VIEWS = {
     "CONVERSATIONAL_BI.FINANCE.V_BUDGET_VS_ACTUAL": "Budget vs actual spend, variance by department or month, over or under budget, budget utilisation",
     "CONVERSATIONAL_BI.FINANCE.V_EXPENSE_SUMMARY": "Expenses by category or department, top vendors, approval rates, reimbursement amounts, monthly expense trends",
     "CONVERSATIONAL_BI.FINANCE.V_INVOICE_AGING": "Outstanding invoices, overdue balances, invoice aging buckets, days to pay, payment trends",
+    "CONVERSATIONAL_BI.SALES.V_INVENTORY_STATUS": "Current stock levels, low stock alerts, reorder status by product and store, quantity on hand vs reorder point",
+    "CONVERSATIONAL_BI.SALES.V_STORE_PERFORMANCE": "Revenue and order count by store, store performance by region, average order value by store, unique customers per store",
 }
 
 

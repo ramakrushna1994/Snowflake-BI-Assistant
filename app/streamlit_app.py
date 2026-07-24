@@ -29,6 +29,9 @@ with st.sidebar:
         "Top expense categories this year?",
         "Invoice aging — how much is overdue?",
         "Return rate by product category?",
+        "Which products are running low on stock?",
+        "Which stores have the highest revenue this quarter?",
+        "Which departments have the highest absenteeism?",
     ]
     for ex in examples:
         if st.button(ex, key=f"ex_{ex}"):
