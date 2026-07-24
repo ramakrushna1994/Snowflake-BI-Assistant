@@ -3,7 +3,7 @@ from snowflake.snowpark.context import get_active_session
 import pandas as pd
 import re
 
-from prompts import SEMANTIC_VIEWS, build_summary_prompt
+from prompts import SEMANTIC_VIEWS, CORTEX_MODEL, build_summary_prompt
 from query_engine import (
     get_live_schema, generate_sql, validate_sql, ensure_limit,
     score_sql, run_query,
@@ -190,7 +190,7 @@ if ask_clicked and question.strip():
             summary_prompt = build_summary_prompt(question, results_str)
             sp_escaped = summary_prompt.replace("'", "''")
             summary = session.sql(
-                f"SELECT SNOWFLAKE.CORTEX.COMPLETE('mistral-large2', '{sp_escaped}') AS R"
+                f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{CORTEX_MODEL}', '{sp_escaped}') AS R"
             ).collect()[0]["R"].strip()
         st.markdown("#### Summary")
         st.markdown(summary)

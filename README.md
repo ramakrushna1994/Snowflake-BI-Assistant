@@ -84,6 +84,20 @@ Pre-aggregated views that bypass SQL generation for common question patterns:
 - Snowflake account with ACCOUNTADMIN role
 - Cortex LLM access (`mistral-large2` must be available in your region)
 
+**Verify Cortex availability** — run this in a Snowsight worksheet:
+
+```sql
+SELECT SNOWFLAKE.CORTEX.COMPLETE('mistral-large2', 'ping');
+```
+
+If it returns a response, you're good. If you get an error (model unavailable in your region), change the model constant in `app/prompts.py`:
+
+```python
+CORTEX_MODEL = "llama3.1-70b"  # fallback if mistral-large2 is unavailable
+```
+
+Other supported fallback models: `llama3.1-8b`, `mistral-7b`, `gemma-7b`. Check [Cortex LLM availability](https://docs.snowflake.com/en/user-guide/snowflake-cortex/llm-functions#availability) for your region.
+
 ### Step 1 — Run Setup Scripts (in order)
 
 Execute in Snowsight SQL worksheet:

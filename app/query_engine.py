@@ -84,12 +84,12 @@ def generate_sql(session, question, schema_context, semantic_views):
     
     Returns dict: {"type": "view"|"sql", "value": str, "confidence": str|None, "error": str|None}
     """
-    from prompts import build_router_and_sql_prompt
+    from prompts import build_router_and_sql_prompt, CORTEX_MODEL
 
     prompt = build_router_and_sql_prompt(question, schema_context)
     prompt_escaped = prompt.replace("'", "''")
     raw = session.sql(
-        f"SELECT SNOWFLAKE.CORTEX.COMPLETE('mistral-large2', '{prompt_escaped}') AS R"
+        f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{CORTEX_MODEL}', '{prompt_escaped}') AS R"
     ).collect()[0]["R"].strip()
 
     # Try to parse JSON response
@@ -183,18 +183,40 @@ def compute_schema_compliance(sql, known_identifiers):
 
 # ── Confidence Scoring ────────────────────────────────────────────────────────
 
+def _trim_schema_for_sql(sql, schema_context):
+    """Extract only the table definitions referenced in the SQL from full schema_context."""
+    # Find table names referenced in SQL (dot-separated identifiers with 2-3 parts)
+    sql_upper = sql.upper()
+    lines = schema_context.split("\n")
+    trimmed = []
+    include_table = False
+    for line in lines:
+        if not line.startswith("  "):
+            # This is a table header line (e.g. CONVERSATIONAL_BI.SALES.PRODUCTS)
+            include_table = line.strip().upper() in sql_upper or \
+                            line.strip().split(".")[-1] in sql_upper
+            if include_table:
+                trimmed.append(line)
+        elif include_table:
+            trimmed.append(line)
+    return "\n".join(trimmed) if trimmed else schema_context
+
+
 def score_sql(session, question, sql, schema_context, known_identifiers):
     """Score SQL: RELEVANCE and SQL_QUALITY via LLM, SCHEMA_COMPLIANCE via code."""
-    from prompts import build_score_prompt
+    from prompts import build_score_prompt, CORTEX_MODEL
 
     # Code-verified schema compliance
     compliance_score, compliance_reason = compute_schema_compliance(sql, known_identifiers)
+
+    # Trim schema to only tables referenced in the SQL (reduces token usage)
+    relevant_schema = _trim_schema_for_sql(sql, schema_context)
 
     # LLM-scored subjective criteria
     prompt = build_score_prompt(question, sql)
     prompt_escaped = prompt.replace("'", "''")
     raw = session.sql(
-        f"SELECT SNOWFLAKE.CORTEX.COMPLETE('mistral-large2', '{prompt_escaped}') AS R"
+        f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{CORTEX_MODEL}', '{prompt_escaped}') AS R"
     ).collect()[0]["R"].strip()
 
     result = {

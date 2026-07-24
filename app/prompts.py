@@ -1,5 +1,7 @@
 """Prompt builders for DataForge BI Assistant (v2.1)."""
 
+CORTEX_MODEL = "mistral-large2"
+
 SEMANTIC_VIEWS = {
     "CONVERSATIONAL_BI.SALES.V_MONTHLY_REVENUE": "Monthly revenue trend, revenue by month or year, order volume over time, average order value trends",
     "CONVERSATIONAL_BI.SALES.V_PRODUCT_PERFORMANCE": "Top or bottom products, product revenue, units sold, product margin, return rate by product, revenue by category or subcategory",
@@ -43,9 +45,6 @@ def build_router_and_sql_prompt(question, schema_context):
 - Do NOT generate DDL or DML (no DROP, INSERT, UPDATE, DELETE, ALTER, TRUNCATE, GRANT, MERGE).
 - Use ORDER BY + LIMIT for "top N" questions.
 - Use SUM/AVG/COUNT for aggregation questions.
-- For revenue use ORDER_ITEMS (QUANTITY * UNIT_PRICE) or LINE_TOTAL.
-- For payroll questions use the PAYROLL table.
-- For budget questions use BUDGET_LINES joined with GL_ACCOUNTS and DEPARTMENTS.
 - For relative time references like "last month", use DATEADD(MONTH, -1, CURRENT_DATE()).
 - For "last N days", use WHERE col >= DATEADD(DAY, -N, CURRENT_DATE()).
 - For "this year", use WHERE YEAR(col) = YEAR(CURRENT_DATE()).
