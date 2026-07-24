@@ -11,7 +11,7 @@ from query_engine import (
 
 st.set_page_config(page_title="DataForge", layout="wide")
 st.title("DataForge")
-st.caption("Conversational BI powered by Snowflake Cortex — Sales · HR · Finance")
+st.caption("Conversational BI powered by Snowflake Cortex — Sales · HR · Finance · v2.1")
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
