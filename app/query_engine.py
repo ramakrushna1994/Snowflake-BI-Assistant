@@ -201,54 +201,59 @@ def compute_schema_compliance(sql, known_identifiers):
 # ── Confidence Scoring ────────────────────────────────────────────────────────
 
 def score_sql(session, question, sql, known_identifiers):
-    """Score SQL: RELEVANCE and SQL_QUALITY via LLM, SCHEMA_COMPLIANCE via code."""
+    """Score SQL: RELEVANCE and SQL_QUALITY via LLM, SCHEMA_COMPLIANCE via code.
+    Never raises — always returns a populated dict even if the LLM call fails.
+    """
     from prompts import build_score_prompt, CORTEX_MODEL
 
-    # Code-verified schema compliance
+    # Code-verified schema compliance (never fails)
     compliance_score, compliance_reason = compute_schema_compliance(sql, known_identifiers)
 
-    # LLM-scored subjective criteria (schema compliance is handled in code above,
-    # so the scoring prompt only needs the question and generated SQL)
-    prompt = build_score_prompt(question, sql)
-    prompt_escaped = prompt.replace("'", "''")
-    raw = session.sql(
-        f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{CORTEX_MODEL}', '{prompt_escaped}') AS R"
-    ).collect()[0]["R"]
-    if not raw:
-        raise ValueError("Cortex returned an empty response for scoring.")
-    raw = raw.strip()
-
     result = {
-        "relevance": 0, "relevance_reason": "",
+        "relevance": 0, "relevance_reason": "LLM scoring unavailable",
         "schema_compliance": compliance_score, "schema_compliance_reason": compliance_reason,
-        "sql_quality": 0, "sql_quality_reason": "",
-        "verdict": "NEEDS REVIEW", "raw": raw
+        "sql_quality": 0, "sql_quality_reason": "LLM scoring unavailable",
+        "verdict": "NEEDS REVIEW", "raw": "",
+        "llm_scored": False,
     }
 
-    for line in raw.splitlines():
-        line = line.strip()
-        m = re.match(r"RELEVANCE:\s*(\d+)/10\s*\|\s*(.+)", line)
-        if m:
-            result["relevance"] = int(m.group(1))
-            result["relevance_reason"] = m.group(2).strip()
-        else:
-            m = re.match(r"SQL_QUALITY:\s*(\d+)/10\s*\|\s*(.+)", line)
-            if m:
-                result["sql_quality"] = int(m.group(1))
-                result["sql_quality_reason"] = m.group(2).strip()
-            else:
-                m = re.match(r"VERDICT:\s*(GOOD|NEEDS REVIEW|RISKY)", line)
+    # LLM-scored subjective criteria — safe, never raises
+    try:
+        prompt = build_score_prompt(question, sql)
+        prompt_escaped = prompt.replace("'", "''")
+        raw = session.sql(
+            f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{CORTEX_MODEL}', '{prompt_escaped}') AS R"
+        ).collect()[0]["R"]
+        if raw:
+            raw = raw.strip()
+            result["raw"] = raw
+            result["llm_scored"] = True
+            for line in raw.splitlines():
+                line = line.strip()
+                m = re.match(r"RELEVANCE:\s*(\d+)/10\s*\|\s*(.+)", line)
                 if m:
-                    result["verdict"] = m.group(1)
+                    result["relevance"] = int(m.group(1))
+                    result["relevance_reason"] = m.group(2).strip()
+                else:
+                    m = re.match(r"SQL_QUALITY:\s*(\d+)/10\s*\|\s*(.+)", line)
+                    if m:
+                        result["sql_quality"] = int(m.group(1))
+                        result["sql_quality_reason"] = m.group(2).strip()
+                    else:
+                        m = re.match(r"VERDICT:\s*(GOOD|NEEDS REVIEW|RISKY)", line)
+                        if m:
+                            result["verdict"] = m.group(1)
+    except Exception:
+        pass  # partial result already set above; schema compliance still valid
 
-    # Override verdict if schema compliance is low
+    # Override verdict based on schema compliance
     if compliance_score < 5:
         result["verdict"] = "RISKY"
     elif compliance_score < 8 and result["verdict"] == "GOOD":
         result["verdict"] = "NEEDS REVIEW"
 
-    # Detect unparsed state
-    if result["relevance"] == 0 and result["sql_quality"] == 0:
+    # Mark if LLM scores couldn't be parsed
+    if result["llm_scored"] and result["relevance"] == 0 and result["sql_quality"] == 0:
         result["verdict"] = "UNSCORED"
         result["relevance_reason"] = "Score parsing failed — see raw output"
         result["sql_quality_reason"] = "Score parsing failed — see raw output"
