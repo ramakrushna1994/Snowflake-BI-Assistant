@@ -11,10 +11,13 @@ def get_live_schema(session):
     table_columns_set is a set of uppercase "SCHEMA.TABLE.COLUMN" for compliance checking.
     """
     rows = session.sql("""
-        SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE
-        FROM CONVERSATIONAL_BI.INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA IN ('SALES','HR','FINANCE')
-        ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION
+        SELECT c.TABLE_SCHEMA, c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE
+        FROM CONVERSATIONAL_BI.INFORMATION_SCHEMA.COLUMNS c
+        JOIN CONVERSATIONAL_BI.INFORMATION_SCHEMA.TABLES t
+          ON c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME
+        WHERE c.TABLE_SCHEMA IN ('SALES','HR','FINANCE')
+          AND t.TABLE_TYPE = 'BASE TABLE'
+        ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION
     """).collect()
 
     tables = {}
@@ -79,18 +82,21 @@ def ensure_limit(sql, max_rows=500):
 
 # ── SQL Generation (merged routing + generation) ──────────────────────────────
 
-def generate_sql(session, question, schema_context, semantic_views):
+def generate_sql(session, question, schema_context, semantic_views, history=None):
     """Single LLM call: routes to semantic view or generates SQL.
     
     Returns dict: {"type": "view"|"sql", "value": str, "confidence": str|None, "error": str|None}
     """
     from prompts import build_router_and_sql_prompt, CORTEX_MODEL
 
-    prompt = build_router_and_sql_prompt(question, schema_context)
+    prompt = build_router_and_sql_prompt(question, schema_context, history=history)
     prompt_escaped = prompt.replace("'", "''")
     raw = session.sql(
         f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{CORTEX_MODEL}', '{prompt_escaped}') AS R"
-    ).collect()[0]["R"].strip()
+    ).collect()[0]["R"]
+    if not raw:
+        raise ValueError("Cortex returned an empty response.")
+    raw = raw.strip()
 
     # Try to parse JSON response
     try:
@@ -217,7 +223,10 @@ def score_sql(session, question, sql, schema_context, known_identifiers):
     prompt_escaped = prompt.replace("'", "''")
     raw = session.sql(
         f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{CORTEX_MODEL}', '{prompt_escaped}') AS R"
-    ).collect()[0]["R"].strip()
+    ).collect()[0]["R"]
+    if not raw:
+        raise ValueError("Cortex returned an empty response for scoring.")
+    raw = raw.strip()
 
     result = {
         "relevance": 0, "relevance_reason": "",
@@ -247,6 +256,12 @@ def score_sql(session, question, sql, schema_context, known_identifiers):
         result["verdict"] = "RISKY"
     elif compliance_score < 8 and result["verdict"] == "GOOD":
         result["verdict"] = "NEEDS REVIEW"
+
+    # Detect unparsed state
+    if result["relevance"] == 0 and result["sql_quality"] == 0:
+        result["verdict"] = "UNSCORED"
+        result["relevance_reason"] = "Score parsing failed — see raw output"
+        result["sql_quality_reason"] = "Score parsing failed — see raw output"
 
     return result
 

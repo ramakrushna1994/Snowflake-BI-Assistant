@@ -19,11 +19,17 @@ SEMANTIC_VIEWS = {
 }
 
 
-def build_router_and_sql_prompt(question, schema_context):
+def build_router_and_sql_prompt(question, schema_context, history=None):
     """Single prompt that routes to a semantic view OR generates SQL directly."""
     view_list = "\n".join([f"- {v}: {desc}" for v, desc in SEMANTIC_VIEWS.items()])
+    history_block = ""
+    if history:
+        history_lines = []
+        for h in history[-2:]:
+            history_lines.append(f"Previous Q: {h['question']}\nPrevious SQL: {h['sql']}")
+        history_block = f"\n## Prior Conversation Context\n" + "\n\n".join(history_lines) + "\n"
     return f"""You are a Snowflake BI query router and SQL generator. Given a user question, first decide if it can be answered from a pre-built semantic view. If yes (with high confidence), return the view name. Otherwise, generate SQL.
-
+{history_block}
 ## Available Semantic Views
 {view_list}
 

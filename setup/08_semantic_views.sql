@@ -226,7 +226,7 @@ SELECT
     DATE_TRUNC('MONTH', i.INVOICE_DATE)         AS INVOICE_MONTH,
     CASE
         WHEN i.INVOICE_STATUS = 'Paid'    THEN 'Paid'
-        WHEN CURRENT_DATE() <= i.DUE_DATE THEN '0-30 days'
+        WHEN CURRENT_DATE() <= i.DUE_DATE THEN 'Current (not yet due)'
         WHEN DATEDIFF('DAY', i.DUE_DATE, CURRENT_DATE()) <= 30  THEN '1-30 days overdue'
         WHEN DATEDIFF('DAY', i.DUE_DATE, CURRENT_DATE()) <= 60  THEN '31-60 days overdue'
         WHEN DATEDIFF('DAY', i.DUE_DATE, CURRENT_DATE()) <= 90  THEN '61-90 days overdue'

@@ -11,7 +11,7 @@ from query_engine import (
 
 st.set_page_config(page_title="DataForge", layout="wide")
 st.title("DataForge")
-st.caption("Conversational BI powered by Snowflake Cortex — Sales · HR · Finance · v2.1")
+st.caption("Conversational BI powered by Snowflake Cortex — Sales · HR · Finance")
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -35,7 +35,8 @@ with st.sidebar:
     ]
     for ex in examples:
         if st.button(ex, key=f"ex_{ex}"):
-            st.session_state["q"] = ex
+            st.session_state["question_input"] = ex
+            st.rerun()
 
     st.divider()
     st.subheader("Semantic Views")
@@ -53,7 +54,7 @@ with st.sidebar:
 
 # ── Input ─────────────────────────────────────────────────────────────────────
 
-default_q = st.session_state.get("q", "")
+default_q = st.session_state.get("question_input", "")
 question = st.text_input("Ask a question:", value=default_q, key="question_input")
 ask_clicked = st.button("Ask", type="primary")
 
@@ -63,6 +64,11 @@ ask_clicked = st.button("Ask", type="primary")
 def render_confidence(scores):
     verdict = scores["verdict"]
     st.markdown("#### Confidence Score")
+    if verdict == "UNSCORED":
+        st.info("Confidence: UNSCORED — scoring output could not be parsed.")
+        with st.expander("Raw scoring output"):
+            st.text(scores.get("raw", "N/A"))
+        return
     if verdict == "GOOD":
         st.success(f"Confidence: {verdict}")
     elif verdict == "NEEDS REVIEW":
@@ -88,7 +94,8 @@ def render_chart(df):
     non_numeric = [c for c in df.columns if c not in numeric_cols]
     try:
         if non_numeric and len(df) > 1:
-            st.bar_chart(df.set_index(non_numeric[0])[numeric_cols[:2]])
+            chart_df = df.groupby(non_numeric[0])[numeric_cols[:2]].sum().reset_index()
+            st.bar_chart(chart_df.set_index(non_numeric[0]))
         elif len(df) > 1:
             st.line_chart(df[numeric_cols[:2]])
     except Exception:
@@ -98,7 +105,6 @@ def render_chart(df):
 # ── Main Processing ───────────────────────────────────────────────────────────
 
 if ask_clicked and question.strip():
-    st.session_state["q"] = ""
     if "session" not in st.session_state:
         st.session_state["session"] = get_active_session()
     session = st.session_state["session"]
@@ -118,6 +124,20 @@ if ask_clicked and question.strip():
     schema_context = st.session_state["schema_context"]
     known_identifiers = st.session_state["known_identifiers"]
 
+    if not schema_context.strip():
+        st.error("Schema loaded empty. Verify SALES, HR, and FINANCE schemas exist and the app role has USAGE on INFORMATION_SCHEMA.")
+        st.stop()
+
+    # Display conversation history
+    history = st.session_state.get("history", [])
+    if history:
+        st.markdown("#### Conversation History")
+        for h in history[-3:]:
+            with st.expander(f"Q: {h['question']}", expanded=False):
+                st.code(h["sql"], language="sql")
+                if h.get("summary"):
+                    st.caption(h["summary"][:200])
+
     st.markdown("---")
     st.markdown("**Q:**")
     st.write(question)
@@ -125,7 +145,7 @@ if ask_clicked and question.strip():
     # Step 1: Single LLM call — route to semantic view or generate SQL
     try:
         with st.spinner("Generating query..."):
-            result = generate_sql(session, question, schema_context, SEMANTIC_VIEWS)
+            result = generate_sql(session, question, schema_context, SEMANTIC_VIEWS, history=history)
     except Exception as e:
         st.session_state.setdefault("errors", []).append(f"generate_sql: {e}")
         st.error(f"Query generation error: {e}")
@@ -139,6 +159,7 @@ if ask_clicked and question.strip():
         view_name = result["value"]
         st.info(f"Answered from semantic view: `{view_name.split('.')[-1]}`")
         query_sql = f"SELECT * FROM {view_name} LIMIT 500"
+        final_sql = query_sql
         with st.expander("Query", expanded=False):
             st.code(query_sql, language="sql")
 
@@ -160,6 +181,7 @@ if ask_clicked and question.strip():
 
         # Ensure row limit
         generated_sql = ensure_limit(generated_sql)
+        final_sql = generated_sql
 
         with st.expander("Generated SQL", expanded=True):
             st.code(generated_sql, language="sql")
@@ -187,6 +209,7 @@ if ask_clicked and question.strip():
     render_chart(df)
 
     # Summary
+    summary_text = ""
     try:
         with st.spinner("Generating summary..."):
             results_str = df.head(20).to_string(index=False)
@@ -194,11 +217,25 @@ if ask_clicked and question.strip():
             sp_escaped = summary_prompt.replace("'", "''")
             summary = session.sql(
                 f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{CORTEX_MODEL}', '{sp_escaped}') AS R"
-            ).collect()[0]["R"].strip()
+            ).collect()[0]["R"]
+            if not summary:
+                raise ValueError("Cortex returned an empty response for summary.")
+            summary = summary.strip()
+            summary_text = summary
         st.markdown("#### Summary")
         st.markdown(summary)
     except Exception as e:
         st.warning(f"Summary unavailable: {e}")
 
+    # Save to conversation history (cap at 3)
+    st.session_state.setdefault("history", []).append({
+        "question": question,
+        "sql": final_sql,
+        "summary": summary_text,
+    })
+    st.session_state["history"] = st.session_state["history"][-3:]
+
 elif not ask_clicked:
     st.markdown("Type a question above and click **Ask**.")
+elif ask_clicked and not question.strip():
+    st.warning("Please enter a question before clicking Ask.")
