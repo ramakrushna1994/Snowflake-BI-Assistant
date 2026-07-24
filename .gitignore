@@ -1,7 +1,13 @@
+# Local tool metadata
+.cortex/
+
+# Snow CLI build output
+app/output/
+
+# Python
 __pycache__/
 *.pyc
-.env
-.venv/
-*.log
+
+# OS
 .DS_Store
 Thumbs.db
