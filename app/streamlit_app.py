@@ -59,8 +59,10 @@ with st.sidebar:
 
 # ── Input ─────────────────────────────────────────────────────────────────────
 
-default_q = st.session_state.get("question_input", "")
-question = st.text_input("Ask a question:", value=default_q, key="question_input")
+# The widget stores its value in st.session_state["question_input"]. Example
+# buttons pre-fill by setting that key before rerun, so do NOT also pass value=
+# (that would conflict with the Session State API and drop the pre-filled text).
+question = st.text_input("Ask a question:", key="question_input")
 ask_clicked = st.button("Ask", type="primary")
 
 
