@@ -5,8 +5,22 @@ on:
     branches: [main]
     paths:
       - 'setup/**'
+  workflow_dispatch:          # ← trigger from Actions tab without a code push
+    inputs:
+      run_all_scripts:
+        description: >
+          Run all setup scripts in order (01→08).
+          Use this for a full reseed / first-time setup.
+          Leave false to run only the scripts changed since the last commit.
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 jobs:
+  # ── Detect which scripts changed (skipped when run_all=true) ────────────────
   detect-changes:
     runs-on: ubuntu-latest
     outputs:
@@ -21,25 +35,39 @@ jobs:
       - name: Detect changed SQL scripts
         id: changed
         run: |
-          CHANGED=$(git diff --name-only HEAD~1 HEAD -- 'setup/*.sql' | sort)
-          if [ -z "$CHANGED" ]; then
-            echo "has_changes=false" >> $GITHUB_OUTPUT
-            echo "scripts=" >> $GITHUB_OUTPUT
-          else
+          # When workflow_dispatch with run_all=true, mark all 8 scripts as changed
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && \
+                "${{ github.event.inputs.run_all_scripts }}" == "true" ]]; then
             echo "has_changes=true" >> $GITHUB_OUTPUT
-            # Newline-separated list encoded for output
             echo "scripts<<EOF" >> $GITHUB_OUTPUT
-            echo "$CHANGED" >> $GITHUB_OUTPUT
+            ls setup/*.sql | sort >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
-            echo "Changed scripts:"
-            echo "$CHANGED"
+            echo "Mode: run ALL scripts (workflow_dispatch)"
+            ls setup/*.sql | sort
+          else
+            # Push trigger or dispatch with run_all=false → changed files only
+            CHANGED=$(git diff --name-only HEAD~1 HEAD -- 'setup/*.sql' | sort)
+            if [ -z "$CHANGED" ]; then
+              echo "has_changes=false" >> $GITHUB_OUTPUT
+              echo "scripts=" >> $GITHUB_OUTPUT
+              echo "No SQL scripts changed — nothing to deploy."
+            else
+              echo "has_changes=true" >> $GITHUB_OUTPUT
+              echo "scripts<<EOF" >> $GITHUB_OUTPUT
+              echo "$CHANGED" >> $GITHUB_OUTPUT
+              echo "EOF" >> $GITHUB_OUTPUT
+              echo "Changed scripts:"
+              echo "$CHANGED"
+            fi
           fi
 
+  # ── Deploy with prod approval gate ──────────────────────────────────────────
   approve-and-deploy:
     needs: detect-changes
     if: needs.detect-changes.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
-    environment: prod
+    environment: prod          # requires manual approval
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -52,30 +80,34 @@ jobs:
           mkdir -p ~/.snowflake
           cat > ~/.snowflake/config.toml << EOF
           [connections.default]
-          account = "${{ secrets.SNOWFLAKE_ACCOUNT }}"
-          user = "RAMAKRUSHNA"
-          password = "${{ secrets.SNOWFLAKE_PASSWORD }}"
-          warehouse = "BI_ASSISTANT_WH"
-          database = "CONVERSATIONAL_BI"
-          schema = "APP"
+          account    = "${{ secrets.SNOWFLAKE_ACCOUNT }}"
+          user       = "RAMAKRUSHNA"
+          password   = "${{ secrets.SNOWFLAKE_PASSWORD }}"
+          warehouse  = "BI_ASSISTANT_WH"
+          database   = "CONVERSATIONAL_BI"
+          schema     = "APP"
           EOF
           chmod 0600 ~/.snowflake/config.toml
 
-      - name: Display scripts to execute
+      - name: Show scripts to execute
         run: |
-          echo "The following SQL scripts will be executed:"
+          echo "Scripts queued for execution:"
           echo "${{ needs.detect-changes.outputs.changed_scripts }}"
 
-      - name: Execute changed SQL scripts
+      - name: Execute SQL scripts in order
         run: |
+          set -e
           echo "${{ needs.detect-changes.outputs.changed_scripts }}" | while read script; do
             if [ -n "$script" ]; then
+              echo ""
               echo "▶ Executing: $script"
               snow sql -f "$script" --connection default
               echo "✓ Completed: $script"
             fi
           done
 
-      - name: Verify
+      - name: Verify connection
         run: |
-          snow sql -q "SELECT CURRENT_DATABASE(), CURRENT_SCHEMA(), CURRENT_TIMESTAMP()" --connection default
+          snow sql -q \
+            "SELECT CURRENT_DATABASE(), CURRENT_SCHEMA(), CURRENT_TIMESTAMP()" \
+            --connection default

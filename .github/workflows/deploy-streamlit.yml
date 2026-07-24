@@ -5,11 +5,18 @@ on:
     branches: [main]
     paths:
       - 'app/**'
+  workflow_dispatch:          # ← lets you trigger from the Actions tab manually
+    inputs:
+      reason:
+        description: 'Reason for manual redeploy (optional)'
+        required: false
+        default: 'Manual redeploy'
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: prod
+    environment: prod          # requires manual approval in prod environment
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -22,22 +29,27 @@ jobs:
           mkdir -p ~/.snowflake
           cat > ~/.snowflake/config.toml << EOF
           [connections.default]
-          account = "${{ secrets.SNOWFLAKE_ACCOUNT }}"
-          user = "RAMAKRUSHNA"
-          password = "${{ secrets.SNOWFLAKE_PASSWORD }}"
-          warehouse = "BI_ASSISTANT_WH"
-          database = "CONVERSATIONAL_BI"
-          schema = "APP"
+          account    = "${{ secrets.SNOWFLAKE_ACCOUNT }}"
+          user       = "RAMAKRUSHNA"
+          password   = "${{ secrets.SNOWFLAKE_PASSWORD }}"
+          warehouse  = "BI_ASSISTANT_WH"
+          database   = "CONVERSATIONAL_BI"
+          schema     = "APP"
           EOF
           chmod 0600 ~/.snowflake/config.toml
 
-      - name: Deploy Streamlit app files
+      - name: Deploy Streamlit app files to stage
         run: |
+          set -e
           cd app
-          snow stage copy streamlit_app.py @CONVERSATIONAL_BI.APP.STREAMLIT_STAGE --overwrite --connection default
-          snow stage copy prompts.py @CONVERSATIONAL_BI.APP.STREAMLIT_STAGE --overwrite --connection default
-          snow stage copy query_engine.py @CONVERSATIONAL_BI.APP.STREAMLIT_STAGE --overwrite --connection default
+          for file in streamlit_app.py prompts.py query_engine.py; do
+            echo "▶ Uploading $file ..."
+            snow stage copy "$file" @CONVERSATIONAL_BI.APP.STREAMLIT_STAGE \
+              --overwrite --connection default
+            echo "✓ $file uploaded"
+          done
 
-      - name: Verify deployment
+      - name: Verify stage contents
         run: |
-          snow sql -q "LIST @CONVERSATIONAL_BI.APP.STREAMLIT_STAGE" --connection default
+          snow sql -q "LIST @CONVERSATIONAL_BI.APP.STREAMLIT_STAGE" \
+            --connection default
