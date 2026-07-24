@@ -13,9 +13,10 @@ A natural language BI assistant powered by Snowflake Cortex. Ask business questi
 - **SQL Safety Guardrails** — Generated SQL is validated to be SELECT-only; DDL/DML keywords (DROP, DELETE, INSERT, ALTER, etc.) are blocked before execution
 - **Row Limiting** — Automatically appends `LIMIT 500` to generated queries missing an explicit limit
 - **Confidence Scoring** — Every generated SQL is scored on Relevance (LLM), Schema Compliance (code-verified against live schema), and SQL Quality (LLM) with a GOOD / NEEDS REVIEW / RISKY verdict
-- **Prompt Injection Defense** — User questions are wrapped in delimiters with explicit instructions to treat content as data, not commands
-- **Auto Charts** — Bar and line charts rendered automatically for numeric results
+- **Prompt Injection Defense** — User questions are wrapped in delimiters with explicit instructions to treat content as data, not commands; question display uses `st.write` to prevent markdown injection in the UI
+- **Auto Charts** — Bar and line charts rendered automatically for numeric results; failures surface a user-visible message instead of silently passing
 - **AI Summaries** — Grounded business summaries that only state facts supported by the result data
+- **Session Caching** — Snowpark session and schema metadata are cached in `st.session_state` to avoid redundant round-trips
 - **Streamlit in Snowflake** — No external hosting required; runs entirely inside your Snowflake account
 
 ---

@@ -1,6 +1,7 @@
 import streamlit as st
 from snowflake.snowpark.context import get_active_session
 import pandas as pd
+import re
 
 from prompts import SEMANTIC_VIEWS, build_summary_prompt
 from query_engine import (
@@ -88,14 +89,16 @@ def render_chart(df):
         elif len(df) > 1:
             st.line_chart(df[numeric_cols[:2]])
     except Exception:
-        pass
+        st.caption("Chart not available for this result shape.")
 
 
 # ── Main Processing ───────────────────────────────────────────────────────────
 
 if ask_clicked and question.strip():
     st.session_state["q"] = ""
-    session = get_active_session()
+    if "session" not in st.session_state:
+        st.session_state["session"] = get_active_session()
+    session = st.session_state["session"]
 
     # Load schema once per session (single query, reused for text + table + identifiers)
     if "schema_context" not in st.session_state:
@@ -113,7 +116,8 @@ if ask_clicked and question.strip():
     known_identifiers = st.session_state["known_identifiers"]
 
     st.markdown("---")
-    st.markdown(f"**Q: {question}**")
+    st.markdown("**Q:**")
+    st.write(question)
 
     # Step 1: Single LLM call — route to semantic view or generate SQL
     try:
@@ -143,9 +147,7 @@ if ask_clicked and question.strip():
     else:
         generated_sql = result["value"]
         # Strip markdown fences if present
-        if "```" in generated_sql:
-            lines = [l for l in generated_sql.split("\n") if not l.strip().startswith("```")]
-            generated_sql = "\n".join(lines).strip()
+        generated_sql = re.sub(r"```(?:sql)?", "", generated_sql).strip()
 
         # SQL safety guardrail
         is_valid, validation_error = validate_sql(generated_sql)

@@ -104,14 +104,13 @@ def generate_sql(session, question, schema_context, semantic_views):
         if "view" in parsed:
             view_name = parsed["view"].strip()
             confidence = parsed.get("confidence", "LOW").upper()
-            # Validate view exists in registry
+            # Exact match: view must exist in registry
             if view_name in semantic_views:
                 if confidence == "HIGH":
                     return {"type": "view", "value": view_name, "confidence": "HIGH", "error": None}
                 else:
-                    # LOW confidence — fall through to SQL generation with a second call
+                    # LOW confidence — fall through to use SQL if available
                     pass
-            # View not in registry or low confidence, treat as needing SQL
         if "sql" in parsed:
             return {"type": "sql", "value": parsed["sql"].strip(), "confidence": None, "error": None}
     except (json.JSONDecodeError, KeyError):
@@ -120,11 +119,6 @@ def generate_sql(session, question, schema_context, semantic_views):
     # Fallback: if response looks like raw SQL (no JSON), use it directly
     if raw.upper().lstrip().startswith(("SELECT", "WITH")):
         return {"type": "sql", "value": raw, "confidence": None, "error": None}
-
-    # If we got a LOW confidence view match, generate SQL with a targeted call
-    # This handles the case where the model returned a view with LOW confidence
-    if "view" in (parsed if 'parsed' in dir() else {}):
-        pass
 
     return {"type": "sql", "value": raw, "confidence": None, "error": "Could not parse LLM response"}
 
@@ -216,13 +210,15 @@ def score_sql(session, question, sql, schema_context, known_identifiers):
         if m:
             result["relevance"] = int(m.group(1))
             result["relevance_reason"] = m.group(2).strip()
-        m = re.match(r"SQL_QUALITY:\s*(\d+)/10\s*\|\s*(.+)", line)
-        if m:
-            result["sql_quality"] = int(m.group(1))
-            result["sql_quality_reason"] = m.group(2).strip()
-        m = re.match(r"VERDICT:\s*(GOOD|NEEDS REVIEW|RISKY)", line)
-        if m:
-            result["verdict"] = m.group(1)
+        else:
+            m = re.match(r"SQL_QUALITY:\s*(\d+)/10\s*\|\s*(.+)", line)
+            if m:
+                result["sql_quality"] = int(m.group(1))
+                result["sql_quality_reason"] = m.group(2).strip()
+            else:
+                m = re.match(r"VERDICT:\s*(GOOD|NEEDS REVIEW|RISKY)", line)
+                if m:
+                    result["verdict"] = m.group(1)
 
     # Override verdict if schema compliance is low
     if compliance_score < 5:
