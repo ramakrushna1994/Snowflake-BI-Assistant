@@ -1,0 +1,15 @@
+definition_version: "2"
+entities:
+  dataforge:
+    type: streamlit
+    identifier:
+      name: CONVERSATIONAL_BI_ASSISTANT
+      schema: APP
+      database: CONVERSATIONAL_BI
+    title: "Conversational BI Assistant"
+    query_warehouse: BI_ASSISTANT_WH
+    main_file: streamlit_app.py
+    artifacts:
+      - streamlit_app.py
+      - prompts.py
+      - query_engine.py
