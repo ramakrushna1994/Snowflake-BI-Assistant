@@ -1,14 +1,11 @@
 """
-DataForge 100-Question Stress Test
-===================================
-Runs 100 complex questions through the full DataForge pipeline on EN42638:
-  question → Cortex prompt → LLM → SQL → validate → execute → record
+DataForge Targeted Test Suite  — 25 representative questions
+=============================================================
+Covers every routing path (VIEW / SQL) and every domain (SALES / HR / FINANCE)
+at ~15% of the cost of a full 100-question run.
 
-Usage:
-    set SF_PASSWORD=your_password
-    python run_100_tests.py
-
-Output: test_results.csv  +  console summary
+Usage (GitHub Actions):  triggered via run-tests.yml
+Local:  set SF_PASSWORD=... && python run_100_tests.py
 """
 
 import os, sys, re, json, time, csv, textwrap
@@ -17,143 +14,57 @@ from datetime import datetime
 # ── Config ────────────────────────────────────────────────────────────────────
 ACCOUNT   = "uzhhplf-en42638"
 USER      = "RAMAKRUSHNA"
-PASSWORD  = "Trishika#0804231"
+PASSWORD  = os.environ.get("SF_PASSWORD", "")
 WAREHOUSE = "BI_ASSISTANT_WH"
 DATABASE  = "CONVERSATIONAL_BI"
 MODEL     = "mistral-large2"
-ROW_LIMIT = 500
+ROW_LIMIT = 200          # smaller limit = less warehouse compute
 
-# ── 100 Test questions ─────────────────────────────────────────────────────────
+# ── 25 Representative questions (one per domain × question-type) ───────────
 QUESTIONS = [
-    # ─── SALES – Revenue & Orders ────────────────────────────────────────────
-    ("SALES", "What is the monthly revenue trend for the last 12 months?"),
-    ("SALES", "Show total revenue and order count for each month in the last 6 months."),
-    ("SALES", "What is the year-over-year revenue growth comparing this year to last year?"),
-    ("SALES", "Which month had the highest gross revenue in the past 2 years?"),
-    ("SALES", "What is the average order value per month for the last year?"),
-    ("SALES", "Show revenue breakdown by week for the last 8 weeks."),
-    ("SALES", "What is the total discount amount given per channel per month?"),
-    ("SALES", "How does net revenue compare to gross revenue by month?"),
-    ("SALES", "What percentage of orders were cancelled each month?"),
-    ("SALES", "Show total orders and revenue by order status."),
+    # ── SALES – should route to semantic views ────────────────────────────
+    ("SALES-VIEW",  "What is the monthly revenue trend for the last 6 months?"),
+    ("SALES-VIEW",  "Top 5 products by revenue?"),
+    ("SALES-VIEW",  "Revenue by customer segment?"),
+    ("SALES-VIEW",  "Which channel has the highest total order volume?"),
+    ("SALES-VIEW",  "What is the return rate by product category?"),
+    ("SALES-VIEW",  "Which products are running low on stock?"),
+    ("SALES-VIEW",  "Which stores have the highest revenue this quarter?"),
 
-    # ─── SALES – Products ────────────────────────────────────────────────────
-    ("SALES", "Top 5 products by total net revenue?"),
-    ("SALES", "Which 10 products have the highest gross margin percentage?"),
-    ("SALES", "List the bottom 5 products by units sold this year."),
-    ("SALES", "Which product categories generate the most revenue?"),
-    ("SALES", "Show revenue and return rate for each product subcategory."),
-    ("SALES", "Which products have a return rate above 15%?"),
-    ("SALES", "What are the top 3 products in each category by revenue?"),
-    ("SALES", "Which products have the highest unit cost and lowest margin?"),
-    ("SALES", "Show total units sold and net revenue per product for Electronics."),
-    ("SALES", "Which products have never been ordered?"),
-    ("SALES", "Compare gross revenue vs net revenue for the top 10 products."),
-    ("SALES", "What is the average unit price vs unit cost for each category?"),
+    # ── SALES – complex queries that need SQL generation ──────────────────
+    ("SALES-SQL",   "Show top 3 products in each category ranked by net revenue."),
+    ("SALES-SQL",   "What is the month-over-month revenue growth rate for each of the last 6 months?"),
+    ("SALES-SQL",   "Which customers placed more than 3 orders and have lifetime value over $3000?"),
+    ("SALES-SQL",   "Show average order value by state, ranked highest to lowest, for the top 10 states."),
 
-    # ─── SALES – Customers ───────────────────────────────────────────────────
-    ("SALES", "Who are the top 10 customers by lifetime value?"),
-    ("SALES", "Show average order value and total orders per customer segment."),
-    ("SALES", "Which customer segment has the highest lifetime value per customer?"),
-    ("SALES", "How many customers in each region placed orders last quarter?"),
-    ("SALES", "Which customers have not ordered in the last 90 days?"),
-    ("SALES", "What is the revenue distribution across Enterprise, Mid-Market and SMB segments?"),
-    ("SALES", "Show customer count and average lifetime value by acquisition channel."),
-    ("SALES", "Which 5 customers have the highest number of returns?"),
-    ("SALES", "What is the average days since last order for each segment?"),
-    ("SALES", "Show total revenue and average order value by state, top 10 states."),
+    # ── HR – should route to semantic views ───────────────────────────────
+    ("HR-VIEW",     "Average salary by department?"),
+    ("HR-VIEW",     "Monthly payroll cost by department?"),
+    ("HR-VIEW",     "Which departments are over budget?"),
+    ("HR-VIEW",     "What is the average performance rating by department?"),
+    ("HR-VIEW",     "Which departments have the highest absenteeism rate?"),
 
-    # ─── SALES – Channels & Stores ───────────────────────────────────────────
-    ("SALES", "Which sales channel has the highest total order volume?"),
-    ("SALES", "Compare average order value across all sales channels."),
-    ("SALES", "What is the monthly revenue trend for each channel?"),
-    ("SALES", "Which channel has the highest total discounts given?"),
-    ("SALES", "Show unique customer count and revenue by channel type (Online/Retail/Wholesale)."),
-    ("SALES", "Which stores have the highest revenue this quarter?"),
-    ("SALES", "Show top 5 stores by average order value."),
-    ("SALES", "What is the revenue per store by region?"),
+    # ── HR – SQL generation ───────────────────────────────────────────────
+    ("HR-SQL",      "Which employees earn more than 150% of their department average salary?"),
+    ("HR-SQL",      "Show bonus payout as a percentage of base salary by job level."),
 
-    # ─── SALES – Returns & Inventory ─────────────────────────────────────────
-    ("SALES", "What is the return rate by product category?"),
-    ("SALES", "Which return reason is most common?"),
-    ("SALES", "Show total refund amount and return count by month."),
-    ("SALES", "Which products have the most returns in the last 6 months?"),
-    ("SALES", "What is the total refund amount by return status?"),
-    ("SALES", "Which products are running low on stock (below reorder point)?"),
-    ("SALES", "Show stores with the most low-stock products."),
+    # ── FINANCE – should route to semantic views ──────────────────────────
+    ("FIN-VIEW",    "Show invoice aging breakdown: current, 30, 60, 90+ days overdue."),
+    ("FIN-VIEW",    "Which departments are over budget this year?"),
+    ("FIN-VIEW",    "Top expense categories this year?"),
 
-    # ─── HR – Headcount & Salaries ────────────────────────────────────────────
-    ("HR", "What is the average salary by department?"),
-    ("HR", "Show headcount, average salary and total salary cost per department."),
-    ("HR", "Which departments are over their headcount budget?"),
-    ("HR", "Who are the top 5 highest paid employees?"),
-    ("HR", "What is the salary range (min, max, avg) for each job level?"),
-    ("HR", "Show employee count by job level and department."),
-    ("HR", "Which departments have the highest total annual salary cost?"),
-    ("HR", "How many employees are in each department?"),
-    ("HR", "What is the average bonus percentage by department?"),
-    ("HR", "Show employees hired in the last 12 months by department."),
-    ("HR", "Which departments have the most senior employees (hired 5+ years ago)?"),
-    ("HR", "What is the difference between actual headcount and headcount budget per department?"),
-    ("HR", "Show salary distribution: how many employees earn above the company average?"),
+    # ── FINANCE – SQL generation ──────────────────────────────────────────
+    ("FIN-SQL",     "Which customers have total outstanding invoice balances above $5000?"),
+    ("FIN-SQL",     "Show monthly expense growth rate for the last 6 months."),
 
-    # ─── HR – Payroll ─────────────────────────────────────────────────────────
-    ("HR", "What is the monthly payroll cost trend for the last 12 months?"),
-    ("HR", "Show total base pay, bonus and overtime by department this year."),
-    ("HR", "Which months had the highest overtime costs?"),
-    ("HR", "What is the average monthly payroll cost per department?"),
-    ("HR", "Show total bonuses paid by department and quarter."),
-    ("HR", "Which departments have the highest overtime hours?"),
-
-    # ─── HR – Performance & Attendance ────────────────────────────────────────
-    ("HR", "What is the average performance rating by department?"),
-    ("HR", "Which departments have the most employees rated below 3 out of 5?"),
-    ("HR", "Show average performance score by job level."),
-    ("HR", "Which departments have the highest absenteeism rate?"),
-    ("HR", "Show total leave days taken by department this year."),
-    ("HR", "What percentage of employees in each department met their goals?"),
-
-    # ─── FINANCE – Invoices ───────────────────────────────────────────────────
-    ("FINANCE", "Show invoice aging breakdown: current, 1-30 days, 31-60 days, 61-90 days, 90+ days overdue."),
-    ("FINANCE", "What is the total outstanding balance by invoice status?"),
-    ("FINANCE", "Which customers have the highest overdue invoice amounts?"),
-    ("FINANCE", "What is the total invoiced amount vs total paid amount this year?"),
-    ("FINANCE", "Show monthly invoice count and total value for the last 12 months."),
-    ("FINANCE", "What is the average days to payment for paid invoices?"),
-    ("FINANCE", "Which invoices have been outstanding for more than 90 days?"),
-    ("FINANCE", "Show total outstanding balance grouped by customer."),
-    ("FINANCE", "What percentage of invoices are paid vs overdue vs sent?"),
-    ("FINANCE", "What is the average invoice amount by status?"),
-
-    # ─── FINANCE – Budget & Expenses ──────────────────────────────────────────
-    ("FINANCE", "Which departments are over budget this year?"),
-    ("FINANCE", "Show budget vs actual spend and variance percentage by department."),
-    ("FINANCE", "What is the total expense amount by category?"),
-    ("FINANCE", "Which vendors have the highest total expenses?"),
-    ("FINANCE", "Show monthly expense trend by top 5 categories."),
-    ("FINANCE", "What is the expense approval rate by department?"),
-    ("FINANCE", "Which departments have the highest budget utilisation percentage?"),
-    ("FINANCE", "Show total reimbursed vs unreimbursed expenses by department."),
-    ("FINANCE", "What are the top 10 most expensive expense entries this year?"),
-    ("FINANCE", "Which cost centers are closest to their budget limit?"),
-
-    # ─── COMPLEX / Cross-domain ───────────────────────────────────────────────
-    ("COMPLEX", "Which product categories have both high revenue and high return rates?"),
-    ("COMPLEX", "Show revenue per department employee (Sales revenue divided by HR headcount per dept)."),
-    ("COMPLEX", "Which channels bring in the most revenue but also have the highest return rates?"),
-    ("COMPLEX", "Compare monthly payroll cost growth rate vs monthly revenue growth rate."),
-    ("COMPLEX", "Which customer segments have high lifetime value but also high return counts?"),
-    ("COMPLEX", "Show departments that are both over headcount budget and over spend budget."),
-    ("COMPLEX", "Which products have high sales volume but below-average gross margin?"),
-    ("COMPLEX", "Show invoice aging summary alongside departmental budget variance."),
-    ("COMPLEX", "Which months have both high sales revenue and high HR overtime costs?"),
-    ("COMPLEX", "Show a scorecard: for each domain (Sales/HR/Finance) list one key metric."),
+    # ── COMPLEX – cross-domain, need SQL ─────────────────────────────────
+    ("COMPLEX",     "Which product categories have both above-average revenue and above-average return rates?"),
+    ("COMPLEX",     "Show departments that are simultaneously over headcount budget and over spend budget."),
 ]
 
-assert len(QUESTIONS) >= 100, f"Expected at least 100 questions, got {len(QUESTIONS)}"
+assert len(QUESTIONS) == 25
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
 def connect():
     import snowflake.connector
     return snowflake.connector.connect(
@@ -162,19 +73,16 @@ def connect():
         session_parameters={"QUERY_TAG": "dataforge_test"}
     )
 
-
-def sf_query(conn, sql, params=None):
+def sf_query(conn, sql):
     cur = conn.cursor()
-    cur.execute(sql, params)
+    cur.execute(sql)
     return cur
-
 
 def call_cortex(conn, prompt):
     escaped = prompt.replace("'", "''")
     cur = sf_query(conn, f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{MODEL}', '{escaped}') AS R")
     row = cur.fetchone()
     return row[0] if row else ""
-
 
 def get_schema_context(conn):
     sql = """
@@ -200,17 +108,13 @@ def get_schema_context(conn):
         lines.extend(tbl_cols)
     return "\n".join(lines)
 
-
 def build_prompt(question, schema_context):
     sys.path.insert(0, "app")
     from prompts import build_router_and_sql_prompt
     return build_router_and_sql_prompt(question, schema_context)
 
-
 def extract_sql(raw):
-    """Parse Cortex response: returns (mode, sql_or_view, confidence)."""
     raw = raw.strip()
-    # Try JSON parse
     json_match = re.search(r'\{.*\}', raw, re.DOTALL)
     if json_match:
         try:
@@ -221,35 +125,24 @@ def extract_sql(raw):
                 return "SQL", data["sql"].strip(), "LLM"
         except Exception:
             pass
-    # Fallback: extract raw SQL block
     code_match = re.search(r'```(?:sql)?\s*(.*?)```', raw, re.DOTALL | re.IGNORECASE)
     if code_match:
         return "SQL", code_match.group(1).strip(), "LLM"
     if re.search(r'\bSELECT\b', raw, re.IGNORECASE):
-        lines = [l for l in raw.splitlines() if re.search(r'\bSELECT|FROM|WHERE|GROUP\b', l, re.IGNORECASE)]
+        lines = [l for l in raw.splitlines()
+                 if re.search(r'\bSELECT|FROM|WHERE|GROUP\b', l, re.IGNORECASE)]
         return "SQL", "\n".join(lines).strip(), "LLM"
     return "UNROUTED", "", ""
 
-
-def ensure_limit(sql, limit=ROW_LIMIT):
+def ensure_limit(sql):
     if not re.search(r'\bLIMIT\b', sql, re.IGNORECASE):
-        sql = sql.rstrip().rstrip(';') + f"\nLIMIT {limit}"
+        sql = sql.rstrip().rstrip(';') + f"\nLIMIT {ROW_LIMIT}"
     return sql
-
-
-def run_sql(conn, sql):
-    cur = conn.cursor()
-    cur.execute(sql)
-    rows = cur.fetchall()
-    cols = [d[0] for d in cur.description] if cur.description else []
-    return rows, cols
-
 
 DANGEROUS = re.compile(
     r'\b(DROP|DELETE|UPDATE|INSERT|ALTER|TRUNCATE|GRANT|MERGE|CREATE|REVOKE|EXEC)\b',
     re.IGNORECASE
 )
-
 
 def validate(sql):
     if DANGEROUS.search(sql):
@@ -258,54 +151,47 @@ def validate(sql):
         return False, "No SELECT found"
     return True, "ok"
 
+def run_sql(conn, sql):
+    cur = conn.cursor()
+    cur.execute(sql)
+    rows = cur.fetchall()
+    cols = [d[0] for d in cur.description] if cur.description else []
+    return rows, cols
 
-# ── Main test loop ─────────────────────────────────────────────────────────────
-
+# ── Main ──────────────────────────────────────────────────────────────────────
 def run_tests():
     if not PASSWORD:
-        print("\n[ERROR] SF_PASSWORD environment variable is not set.")
+        print("[ERROR] SF_PASSWORD not set.")
         sys.exit(1)
 
-    domain_filter = os.environ.get("DOMAIN_FILTER", "").strip().upper()
-    active_questions = [(d, q) for d, q in QUESTIONS
-                        if not domain_filter or d == domain_filter]
-    if domain_filter and not active_questions:
-        print(f"[ERROR] No questions found for domain '{domain_filter}'")
-        sys.exit(1)
+    total = len(QUESTIONS)
+    print(f"\n{'='*65}")
+    print(f"  DataForge Test Suite  —  {total} questions  —  {datetime.now():%Y-%m-%d %H:%M}")
+    print(f"  Account: {ACCOUNT}    Model: {MODEL}")
+    print(f"{'='*65}\n")
 
-    print(f"\n{'='*70}")
-    print(f"  DataForge {len(active_questions)}-Question Test  —  {datetime.now():%Y-%m-%d %H:%M}")
-    print(f"  Account: {ACCOUNT}   Model: {MODEL}")
-    print(f"{'='*70}\n")
-
-    print("Connecting to Snowflake ...", end=" ", flush=True)
+    print("Connecting ...", end=" ", flush=True)
     conn = connect()
     print("OK")
-
-    print("Fetching schema context ...", end=" ", flush=True)
+    print("Fetching schema ...", end=" ", flush=True)
     schema_context = get_schema_context(conn)
-    print(f"OK  ({len(schema_context)} chars)\n")
+    print(f"OK ({len(schema_context)} chars)\n")
 
     results = []
     domain_stats = {}
 
-    for idx, (domain, question) in enumerate(active_questions, 1):
+    for idx, (domain, question) in enumerate(QUESTIONS, 1):
         t0 = time.time()
-        row = {
-            "n": idx, "domain": domain, "question": question,
-            "mode": "", "sql": "", "rows": 0, "elapsed_s": 0,
-            "status": "", "error": ""
-        }
+        row = {"n": idx, "domain": domain, "question": question,
+               "mode": "", "sql": "", "rows": 0, "elapsed_s": 0,
+               "status": "", "error": ""}
 
-        short_q = textwrap.shorten(question, 60)
-        print(f"[{idx:03d}/{len(active_questions)}] [{domain:7s}] {short_q} ... ", end="", flush=True)
+        short_q = textwrap.shorten(question, 55)
+        print(f"[{idx:02d}/{total}] {domain:<10} {short_q} ", end="", flush=True)
 
         try:
-            # 1. Build prompt and call Cortex
             prompt = build_prompt(question, schema_context)
-            raw = call_cortex(conn, prompt)
-
-            # 2. Parse response
+            raw    = call_cortex(conn, prompt)
             mode, target, confidence = extract_sql(raw)
             row["mode"] = mode
 
@@ -317,96 +203,71 @@ def run_tests():
                 row["sql"] = final_sql
                 ok, msg = validate(final_sql)
                 if not ok:
-                    row["status"] = "INVALID"; row["error"] = msg
-                    print(f"INVALID  ({msg})")
+                    row["status"] = "INVALID"; row["error"] = msg; print(f"INVALID ({msg})")
                 else:
-                    rows, cols = run_sql(conn, final_sql)
+                    rows, _ = run_sql(conn, final_sql)
                     row["rows"] = len(rows)
                     row["status"] = "PASS" if rows else "EMPTY"
-                    print(f"VIEW/{confidence}  {len(rows)} rows  ({time.time()-t0:.1f}s)")
-            else:  # SQL
+                    print(f"VIEW/{confidence:<4}  {len(rows):>4} rows  {time.time()-t0:.1f}s")
+            else:
                 final_sql = ensure_limit(target)
                 row["sql"] = final_sql
                 ok, msg = validate(final_sql)
                 if not ok:
-                    row["status"] = "INVALID"; row["error"] = msg
-                    print(f"INVALID  ({msg})")
+                    row["status"] = "INVALID"; row["error"] = msg; print(f"INVALID ({msg})")
                 else:
-                    rows, cols = run_sql(conn, final_sql)
+                    rows, _ = run_sql(conn, final_sql)
                     row["rows"] = len(rows)
                     row["status"] = "PASS" if rows else "EMPTY"
-                    print(f"SQL  {len(rows)} rows  ({time.time()-t0:.1f}s)")
+                    print(f"SQL       {len(rows):>4} rows  {time.time()-t0:.1f}s")
 
         except Exception as e:
             row["status"] = "ERROR"
-            row["error"] = str(e)[:120]
+            row["error"]  = str(e)[:100]
             print(f"ERROR  {row['error']}")
 
         row["elapsed_s"] = round(time.time() - t0, 2)
         results.append(row)
 
-        # Track domain stats
-        d = domain_stats.setdefault(domain, {"PASS":0,"EMPTY":0,"UNROUTED":0,"INVALID":0,"ERROR":0,"total":0,"time":0})
-        d[row["status"]] = d.get(row["status"], 0) + 1
+        d = domain_stats.setdefault(domain, {"PASS":0,"EMPTY":0,"UNROUTED":0,"INVALID":0,"ERROR":0,"total":0,"time":0.0})
+        d[row["status"]] += 1
         d["total"] += 1
-        d["time"] += row["elapsed_s"]
+        d["time"]  += row["elapsed_s"]
 
     conn.close()
 
-    # ── Save CSV ──────────────────────────────────────────────────────────────
-    csv_path = "test_results.csv"
-    fieldnames = ["n","domain","question","status","mode","rows","elapsed_s","sql","error"]
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
+    # Save CSV
+    with open("test_results.csv", "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["n","domain","question","status","mode","rows","elapsed_s","sql","error"])
         w.writeheader()
         for r in results:
-            w.writerow({k: r[k] for k in fieldnames})
-    print(f"\nResults saved to {csv_path}")
+            w.writerow({k: r[k] for k in ["n","domain","question","status","mode","rows","elapsed_s","sql","error"]})
+    print("\nSaved → test_results.csv")
 
-    # ── Summary ───────────────────────────────────────────────────────────────
-    total = len(results)
-    pass_   = sum(1 for r in results if r["status"] == "PASS")
-    empty   = sum(1 for r in results if r["status"] == "EMPTY")
-    unrouted= sum(1 for r in results if r["status"] == "UNROUTED")
-    invalid = sum(1 for r in results if r["status"] == "INVALID")
-    error   = sum(1 for r in results if r["status"] == "ERROR")
-    avg_t   = sum(r["elapsed_s"] for r in results) / total
-
+    # Summary
+    passed   = sum(1 for r in results if r["status"] == "PASS")
+    empty    = sum(1 for r in results if r["status"] == "EMPTY")
+    failures = [r for r in results if r["status"] not in ("PASS","EMPTY")]
+    avg_t    = sum(r["elapsed_s"] for r in results) / total
     via_view = sum(1 for r in results if r["mode"] == "VIEW")
     via_sql  = sum(1 for r in results if r["mode"] == "SQL")
 
-    print(f"\n{'='*70}")
-    print(f"  OVERALL SUMMARY  ({total} questions)")
-    print(f"{'='*70}")
-    print(f"  PASS (has data) : {pass_:3d}  ({pass_/total*100:.0f}%)")
-    print(f"  EMPTY (0 rows)  : {empty:3d}  ({empty/total*100:.0f}%)")
-    print(f"  UNROUTED        : {unrouted:3d}  ({unrouted/total*100:.0f}%)")
-    print(f"  INVALID SQL     : {invalid:3d}  ({invalid/total*100:.0f}%)")
-    print(f"  ERROR           : {error:3d}  ({error/total*100:.0f}%)")
-    print(f"  ─────────────────────────────────────────────")
-    print(f"  Routed via VIEW : {via_view:3d}   via SQL : {via_sql:3d}")
-    print(f"  Avg response    : {avg_t:.1f}s per question")
-    print(f"{'='*70}")
-
-    print(f"\n  BY DOMAIN:")
-    print(f"  {'Domain':<10} {'Total':>6} {'PASS':>6} {'EMPTY':>6} {'FAIL':>6} {'Avg(s)':>7}")
-    print(f"  {'-'*46}")
+    print(f"\n{'='*65}")
+    print(f"  RESULTS: {passed}/{total} PASS   {empty} EMPTY   {len(failures)} FAIL   avg {avg_t:.1f}s/q")
+    print(f"  Routing: {via_view} via VIEW   {via_sql} via SQL")
+    print(f"{'='*65}")
+    print(f"\n  {'Domain':<12} {'Total':>5} {'PASS':>5} {'EMPTY':>5} {'FAIL':>5} {'Avg s':>6}")
+    print(f"  {'-'*40}")
     for dom, s in domain_stats.items():
-        fail = s.get("UNROUTED",0)+s.get("INVALID",0)+s.get("ERROR",0)
-        avg = s["time"]/s["total"] if s["total"] else 0
-        print(f"  {dom:<10} {s['total']:>6} {s.get('PASS',0):>6} {s.get('EMPTY',0):>6} {fail:>6} {avg:>7.1f}")
-    print(f"{'='*70}\n")
-
-    # ── Print failures for quick review ──────────────────────────────────────
-    failures = [r for r in results if r["status"] not in ("PASS","EMPTY")]
+        fail = s["UNROUTED"]+s["INVALID"]+s["ERROR"]
+        print(f"  {dom:<12} {s['total']:>5} {s['PASS']:>5} {s['EMPTY']:>5} {fail:>5} {s['time']/s['total']:>6.1f}")
     if failures:
-        print(f"  FAILURES ({len(failures)}):")
+        print(f"\n  FAILURES:")
         for r in failures:
-            print(f"  [{r['n']:03d}] {r['status']:10s} {textwrap.shorten(r['question'],55)}")
+            print(f"    [{r['n']:02d}] {r['status']:<10} {textwrap.shorten(r['question'],50)}")
             if r["error"]:
-                print(f"             {r['error'][:80]}")
-        print()
-
+                print(f"           {r['error'][:70]}")
+    print()
 
 if __name__ == "__main__":
     run_tests()

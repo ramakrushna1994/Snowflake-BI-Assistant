@@ -12,6 +12,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     environment: prod
+    timeout-minutes: 15     # hard cap — job auto-cancels if it runs over
 
     steps:
       - name: Checkout code
