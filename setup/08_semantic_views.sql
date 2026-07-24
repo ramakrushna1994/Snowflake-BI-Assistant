@@ -1,6 +1,7 @@
 -- ============================================================
 -- 08_semantic_views.sql
 -- Pre-aggregated semantic views to avoid re-running common
+-- Last updated: 2026-07-24 (CI/CD test)
 -- question patterns. Used by DataForge app for direct routing.
 -- ============================================================
 
