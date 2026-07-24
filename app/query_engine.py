@@ -1,4 +1,4 @@
-"""Query engine: schema fetch, SQL generation, validation, scoring, execution."""
+"""Query engine: schema fetch, SQL generation, validation, scoring, execution (v2.1)."""
 
 import re
 import json

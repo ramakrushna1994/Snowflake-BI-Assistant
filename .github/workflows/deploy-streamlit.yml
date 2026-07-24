@@ -28,6 +28,7 @@ jobs:
           database = "CONVERSATIONAL_BI"
           schema = "APP"
           EOF
+          chmod 0600 ~/.snowflake/config.toml
 
       - name: Deploy Streamlit app files
         run: |
