@@ -7,11 +7,15 @@ A natural language BI assistant powered by Snowflake Cortex. Ask business questi
 ## Features
 
 - **Natural Language to SQL** — Powered by Snowflake Cortex (`mistral-large2`)
+- **Single-Call Routing** — One LLM call decides whether to route to a semantic view (with HIGH/LOW confidence) or generate SQL directly
 - **Semantic View Routing** — 11 pre-aggregated views for instant answers on common questions (no SQL generation needed)
 - **Live Schema Metadata** — Schema fetched dynamically from `INFORMATION_SCHEMA` at runtime; handles schema evolution and drift automatically
-- **Confidence Scoring** — Every generated SQL is scored on Relevance, Schema Fit, and SQL Quality (1–10 each) with a GOOD / NEEDS REVIEW / RISKY verdict
+- **SQL Safety Guardrails** — Generated SQL is validated to be SELECT-only; DDL/DML keywords (DROP, DELETE, INSERT, ALTER, etc.) are blocked before execution
+- **Row Limiting** — Automatically appends `LIMIT 500` to generated queries missing an explicit limit
+- **Confidence Scoring** — Every generated SQL is scored on Relevance (LLM), Schema Compliance (code-verified against live schema), and SQL Quality (LLM) with a GOOD / NEEDS REVIEW / RISKY verdict
+- **Prompt Injection Defense** — User questions are wrapped in delimiters with explicit instructions to treat content as data, not commands
 - **Auto Charts** — Bar and line charts rendered automatically for numeric results
-- **AI Summaries** — Structured business summaries with headline finding, bullet points, and recommendations
+- **AI Summaries** — Grounded business summaries that only state facts supported by the result data
 - **Streamlit in Snowflake** — No external hosting required; runs entirely inside your Snowflake account
 
 ---
@@ -111,10 +115,24 @@ Execute in Snowsight SQL worksheet:
 
 ### Step 2 — Upload the App
 
+Using Snow CLI:
+
+```bash
+cd app
+snow stage copy streamlit_app.py @CONVERSATIONAL_BI.APP.STREAMLIT_STAGE --overwrite
+snow stage copy prompts.py @CONVERSATIONAL_BI.APP.STREAMLIT_STAGE --overwrite
+snow stage copy query_engine.py @CONVERSATIONAL_BI.APP.STREAMLIT_STAGE --overwrite
+```
+
+Or via SQL worksheet:
+
 ```sql
 PUT 'file:///path/to/app/streamlit_app.py'
-  @CONVERSATIONAL_BI.APP.STREAMLIT_STAGE
-  AUTO_COMPRESS=FALSE OVERWRITE=TRUE;
+  @CONVERSATIONAL_BI.APP.STREAMLIT_STAGE AUTO_COMPRESS=FALSE OVERWRITE=TRUE;
+PUT 'file:///path/to/app/prompts.py'
+  @CONVERSATIONAL_BI.APP.STREAMLIT_STAGE AUTO_COMPRESS=FALSE OVERWRITE=TRUE;
+PUT 'file:///path/to/app/query_engine.py'
+  @CONVERSATIONAL_BI.APP.STREAMLIT_STAGE AUTO_COMPRESS=FALSE OVERWRITE=TRUE;
 ```
 
 ### Step 3 — Open in Snowsight
@@ -164,9 +182,10 @@ Navigate to **Snowsight → Streamlit → CONVERSATIONAL_BI.APP.CONVERSATIONAL_B
 ```
 Snowflake-BI-Assistant/
 ├── app/
-│   └── streamlit_app.py        # Main DataForge Streamlit app
-├── prompts/
-│   └── system_prompt.txt       # NL-to-SQL system prompt
+│   ├── streamlit_app.py        # UI shell — layout, session state, rendering
+│   ├── prompts.py              # All prompt-builder functions
+│   ├── query_engine.py         # Schema fetch, SQL gen, validation, scoring, execution
+│   └── snowflake.yml           # Snow CLI deployment config
 ├── setup/
 │   ├── 01_create_database.sql  # Database, schemas, warehouse
 │   ├── 02_sales_data.sql       # Initial Sales tables
