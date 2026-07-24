@@ -1,4 +1,4 @@
-"""Prompt builders for DataForge BI Assistant."""
+"""Prompt builders for DataForge BI Assistant (v2.1)."""
 
 SEMANTIC_VIEWS = {
     "CONVERSATIONAL_BI.SALES.V_MONTHLY_REVENUE": "Monthly revenue trend, revenue by month or year, order volume over time, average order value trends",
