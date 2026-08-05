@@ -6,7 +6,8 @@ import re
 from prompts import SEMANTIC_VIEWS, CORTEX_MODEL, build_summary_prompt
 from query_engine import (
     get_live_schema, generate_sql, validate_sql, ensure_limit,
-    score_sql, run_query,
+    score_sql, run_query, check_value_compliance,
+    save_correction, get_relevant_corrections,
 )
 
 st.set_page_config(page_title="DataForge", layout="wide")
@@ -47,7 +48,7 @@ with st.sidebar:
 
     st.divider()
     if st.button("Refresh Schema"):
-        for key in ["schema_context", "schema_table", "known_identifiers", "history", "errors", "session"]:
+        for key in ["schema_context", "schema_table", "known_identifiers", "enum_hints", "history", "errors", "session"]:
             st.session_state.pop(key, None)
         st.experimental_rerun()
     if "schema_table" in st.session_state:
@@ -76,29 +77,36 @@ def render_confidence(scores):
 
     st.markdown("#### Confidence Score")
     if verdict == "GOOD":
-        st.success(f"✅ Confidence: {verdict}")
+        st.success(f"Confidence: {verdict}")
     elif verdict == "NEEDS REVIEW":
-        st.warning(f"⚠️ Confidence: {verdict}")
+        st.warning(f"Confidence: {verdict}")
     elif verdict == "UNSCORED":
-        st.info("ℹ️ Confidence: UNSCORED — LLM scoring output could not be parsed.")
+        st.info("Confidence: UNSCORED — LLM scoring output could not be parsed.")
     else:
-        st.error(f"🔴 Confidence: {verdict}")
+        st.error(f"Confidence: {verdict}")
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Relevance",    f"{scores['relevance']}/10"          if llm_ok else "—",
               help=scores["relevance_reason"])
     c2.metric("Schema Fit",   f"{scores['schema_compliance']}/10",
               help=scores["schema_compliance_reason"])
     c3.metric("SQL Quality",  f"{scores['sql_quality']}/10"         if llm_ok else "—",
               help=scores["sql_quality_reason"])
+    c4.metric("Value Check",  f"{scores.get('value_compliance', '—')}/10",
+              help=scores.get("value_compliance_reason", "Not checked"))
 
     if not llm_ok:
-        st.caption("Relevance & SQL Quality unavailable — only schema compliance scored.")
+        st.caption("Relevance & SQL Quality unavailable — only schema and value compliance scored.")
+
+    if scores.get("bad_values"):
+        st.warning(f"Suspicious values detected: {', '.join(repr(v) for v in scores['bad_values'][:5])}. "
+                   "These may not exist in the database. Consider reporting this as a mistake below.")
 
     with st.expander("Confidence details"):
         st.markdown(f"- **Relevance:** {scores['relevance_reason']}")
         st.markdown(f"- **Schema Fit:** {scores['schema_compliance_reason']}")
         st.markdown(f"- **SQL Quality:** {scores['sql_quality_reason']}")
+        st.markdown(f"- **Value Check:** {scores.get('value_compliance_reason', 'N/A')}")
         if scores.get("raw"):
             st.markdown("**Raw LLM output:**")
             st.text(scores["raw"])
@@ -143,10 +151,11 @@ if ask_clicked and question.strip():
     if "schema_context" not in st.session_state:
         with st.spinner("Loading live schema..."):
             try:
-                schema_text, schema_df, known_ids = get_live_schema(session)
+                schema_text, schema_df, known_ids, enum_hints = get_live_schema(session)
                 st.session_state["schema_context"] = schema_text
                 st.session_state["schema_table"] = schema_df
                 st.session_state["known_identifiers"] = known_ids
+                st.session_state["enum_hints"] = enum_hints
             except Exception as e:
                 st.error(f"Schema load error: {e}")
                 st.stop()
@@ -172,9 +181,11 @@ if ask_clicked and question.strip():
     st.markdown(f"**Q:** {question}")
 
     # Step 1: Single LLM call — route to semantic view or generate SQL
+    # Fetch relevant corrections to inject into prompt
+    corrections = get_relevant_corrections(session, question)
     try:
         with st.spinner("Generating query..."):
-            result = generate_sql(session, question, schema_context, SEMANTIC_VIEWS, history=history)
+            result = generate_sql(session, question, schema_context, SEMANTIC_VIEWS, history=history, corrections=corrections)
     except Exception as e:
         st.session_state.setdefault("errors", []).append(f"generate_sql: {e}")
         st.error(f"Query generation error: {e}")
@@ -183,6 +194,8 @@ if ask_clicked and question.strip():
     if result.get("error") and result["type"] == "sql" and not result["value"]:
         st.error(f"Could not generate a query: {result['error']}")
         st.stop()
+
+    scores = {}  # populated by generated SQL path; empty for view path
 
     if result["type"] == "view":
         view_name = result["value"]
@@ -225,6 +238,17 @@ if ask_clicked and question.strip():
 
         # Confidence scoring — score_sql never raises, always returns a dict
         scores = score_sql(session, question, generated_sql, known_identifiers)
+        # Add value compliance check
+        enum_hints = st.session_state.get("enum_hints", {})
+        val_score, val_reason, bad_vals = check_value_compliance(generated_sql, enum_hints)
+        scores["value_compliance"] = val_score
+        scores["value_compliance_reason"] = val_reason
+        scores["bad_values"] = bad_vals
+        # Downgrade verdict if value compliance is poor
+        if val_score < 5:
+            scores["verdict"] = "RISKY"
+        elif val_score < 8 and scores["verdict"] == "GOOD":
+            scores["verdict"] = "NEEDS REVIEW"
         render_confidence(scores)
 
         # Execute query
@@ -268,6 +292,37 @@ if ask_clicked and question.strip():
         "summary": summary_text,
     })
     st.session_state["history"] = st.session_state["history"][-3:]
+
+    # ── Learn from Mistake ────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### Report a Mistake")
+    st.caption("If the generated SQL was wrong, provide the correct version below. "
+               "Future queries will learn from this correction.")
+
+    with st.expander("Report Mistake", expanded=False):
+        corrected_sql = st.text_area(
+            "Corrected SQL",
+            value=final_sql,
+            height=150,
+            key="correction_sql"
+        )
+        correction_reason = st.text_input(
+            "What was wrong? (e.g., 'Used wrong status value')",
+            key="correction_reason"
+        )
+        if st.button("Save Correction", type="secondary", key="save_correction"):
+            if corrected_sql.strip() and corrected_sql.strip() != final_sql.strip():
+                bad_vals_to_save = scores.get("bad_values", []) if result["type"] != "view" else []
+                save_correction(
+                    session, question, final_sql,
+                    corrected_sql.strip(), correction_reason,
+                    bad_values=bad_vals_to_save
+                )
+                st.success("Correction saved! Future queries will learn from this.")
+            elif corrected_sql.strip() == final_sql.strip():
+                st.warning("The corrected SQL is the same as the generated SQL. Please modify it.")
+            else:
+                st.warning("Please provide the corrected SQL.")
 
 elif not ask_clicked:
     st.markdown("Type a question above and click **Ask**.")

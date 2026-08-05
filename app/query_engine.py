@@ -1,14 +1,57 @@
-"""Query engine: schema fetch, SQL generation, validation, scoring, execution (v2.1)."""
+"""Query engine: schema fetch, SQL generation, validation, scoring, execution (v2.2)."""
 
 import re
 import json
 import pandas as pd
 
 
+# Columns known to be categorical (low-cardinality enums worth exposing to the LLM)
+_ENUM_CANDIDATES = [
+    ("SALES", "ORDERS", "STATUS"),
+    ("SALES", "ORDERS", "CHANNEL"),
+    ("SALES", "ORDERS", "PAYMENT_METHOD"),
+    ("SALES", "PRODUCTS", "CATEGORY"),
+    ("SALES", "PRODUCTS", "SUBCATEGORY"),
+    ("SALES", "CUSTOMERS", "REGION"),
+    ("SALES", "CUSTOMERS", "SEGMENT"),
+    ("SALES", "CUSTOMERS", "ACQUISITION_CHANNEL"),
+    ("SALES", "RETURNS", "RETURN_REASON"),
+    ("SALES", "SALES_CHANNELS", "CHANNEL_NAME"),
+    ("HR", "EMPLOYEES", "DEPARTMENT"),
+    ("HR", "EMPLOYEES", "JOB_LEVEL"),
+    ("HR", "EMPLOYEES", "STATUS"),
+    ("HR", "JOB_HISTORY", "CHANGE_TYPE"),
+    ("FINANCE", "EXPENSES", "APPROVAL_STATUS"),
+    ("FINANCE", "EXPENSES", "CATEGORY"),
+    ("FINANCE", "EXPENSES", "VENDOR"),
+    ("FINANCE", "INVOICES", "INVOICE_STATUS"),
+    ("FINANCE", "GL_ACCOUNTS", "ACCOUNT_TYPE"),
+    ("FINANCE", "GL_ACCOUNTS", "ACCOUNT_CATEGORY"),
+]
+
+
+def get_enum_hints(session):
+    """Fetch distinct values for known categorical columns. Returns dict of column -> values list."""
+    enum_hints = {}
+    for schema, table, column in _ENUM_CANDIDATES:
+        try:
+            rows = session.sql(
+                f"SELECT DISTINCT {column} FROM CONVERSATIONAL_BI.{schema}.{table} "
+                f"WHERE {column} IS NOT NULL ORDER BY {column} LIMIT 15"
+            ).collect()
+            values = [r[column] for r in rows]
+            if values:
+                enum_hints[f"{schema}.{table}.{column}"] = values
+        except Exception:
+            pass
+    return enum_hints
+
+
 def get_live_schema(session):
-    """Fetch schema metadata once. Returns (schema_text, schema_df, table_columns_set).
+    """Fetch schema metadata once. Returns (schema_text, schema_df, table_columns_set, enum_hints).
     
     table_columns_set is a set of uppercase "SCHEMA.TABLE.COLUMN" for compliance checking.
+    enum_hints is a dict mapping "SCHEMA.TABLE.COLUMN" to list of valid values.
     """
     rows = session.sql("""
         SELECT c.TABLE_SCHEMA, c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE
@@ -27,7 +70,7 @@ def get_live_schema(session):
         table = r['TABLE_NAME']
         column = r['COLUMN_NAME']
         fqn = f"CONVERSATIONAL_BI.{schema}.{table}"
-        tables.setdefault(fqn, []).append(f"  - {column} ({r['DATA_TYPE']})")
+        tables.setdefault(fqn, []).append((column, r['DATA_TYPE'], f"{schema}.{table}.{column}"))
         # Track identifiers for compliance checking
         known_identifiers.add(f"{schema}.{table}.{column}".upper())
         known_identifiers.add(f"CONVERSATIONAL_BI.{schema}.{table}.{column}".upper())
@@ -37,13 +80,22 @@ def get_live_schema(session):
         known_identifiers.add(f"CONVERSATIONAL_BI.{schema}.{table}".upper())
         known_identifiers.add(column.upper())
 
+    # Fetch enum hints
+    enum_hints = get_enum_hints(session)
+
+    # Build schema text with enum annotations
     lines = []
     for tbl, cols in tables.items():
         lines.append(tbl)
-        lines.extend(cols)
+        for col_name, data_type, fqcol in cols:
+            hint = ""
+            if fqcol in enum_hints:
+                vals = ", ".join(enum_hints[fqcol])
+                hint = f"  -- Values: {vals}"
+            lines.append(f"  - {col_name} ({data_type}){hint}")
     schema_text = "\n".join(lines)
     schema_df = pd.DataFrame(rows)
-    return schema_text, schema_df, known_identifiers
+    return schema_text, schema_df, known_identifiers, enum_hints
 
 
 # ── SQL Validation ────────────────────────────────────────────────────────────
@@ -82,14 +134,14 @@ def ensure_limit(sql, max_rows=500):
 
 # ── SQL Generation (merged routing + generation) ──────────────────────────────
 
-def generate_sql(session, question, schema_context, semantic_views, history=None):
+def generate_sql(session, question, schema_context, semantic_views, history=None, corrections=None):
     """Single LLM call: routes to semantic view or generates SQL.
     
     Returns dict: {"type": "view"|"sql", "value": str, "confidence": str|None, "error": str|None}
     """
     from prompts import build_router_and_sql_prompt, CORTEX_MODEL
 
-    prompt = build_router_and_sql_prompt(question, schema_context, history=history)
+    prompt = build_router_and_sql_prompt(question, schema_context, history=history, corrections=corrections)
     prompt_escaped = prompt.replace("'", "''")
     raw = session.sql(
         f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{CORTEX_MODEL}', '{prompt_escaped}') AS R"
@@ -259,6 +311,124 @@ def score_sql(session, question, sql, known_identifiers):
         result["sql_quality_reason"] = "Score parsing failed — see raw output"
 
     return result
+
+
+# ── Value Compliance (string literal validation) ──────────────────────────────
+
+def _extract_string_literals(sql):
+    """Extract all single-quoted string literals from SQL."""
+    return re.findall(r"'([^']*)'", sql)
+
+
+def check_value_compliance(sql, enum_hints):
+    """Check string literals in SQL against known enum values.
+    
+    Returns (score 1-10, reason, list_of_bad_values).
+    """
+    literals = _extract_string_literals(sql)
+    if not literals:
+        return 10, "No string literals to validate", []
+
+    # Build a reverse lookup: value -> which columns accept it
+    value_to_columns = {}
+    all_known_values = set()
+    for col_key, values in enum_hints.items():
+        for v in values:
+            all_known_values.add(v.upper())
+            value_to_columns.setdefault(v.upper(), []).append(col_key)
+
+    # Check each literal
+    bad_values = []
+    checked = 0
+    for lit in literals:
+        # Skip date-like strings, numbers, wildcards
+        if re.match(r'^\d{4}[-/]\d{2}', lit):
+            continue
+        if re.match(r'^[\d.]+$', lit):
+            continue
+        if '%' in lit:
+            continue
+        # Only check if it looks like an enum value (short alpha string)
+        if len(lit) > 50 or lit.strip() == '':
+            continue
+        checked += 1
+        if lit.upper() not in all_known_values:
+            bad_values.append(lit)
+
+    if checked == 0:
+        return 10, "No enum-like literals to validate", []
+
+    valid = checked - len(bad_values)
+    ratio = valid / checked
+    score = max(1, min(10, round(ratio * 10)))
+
+    if bad_values:
+        reason = f"{valid}/{checked} literals valid; unrecognized: {', '.join(repr(v) for v in bad_values[:3])}"
+    else:
+        reason = f"All {checked} string literals match known enum values"
+    return score, reason, bad_values
+
+
+# ── Query Corrections (learn from mistakes) ───────────────────────────────────
+
+_CORRECTIONS_TABLE = "CONVERSATIONAL_BI.APP.QUERY_CORRECTIONS"
+
+
+def _ensure_corrections_table(session):
+    """Create the corrections table if it doesn't exist."""
+    session.sql(f"""
+        CREATE TABLE IF NOT EXISTS {_CORRECTIONS_TABLE} (
+            CORRECTION_ID INT AUTOINCREMENT PRIMARY KEY,
+            QUESTION VARCHAR(1000),
+            BAD_SQL VARCHAR(5000),
+            CORRECTED_SQL VARCHAR(5000),
+            REASON VARCHAR(500),
+            BAD_VALUES VARCHAR(500),
+            CREATED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+        )
+    """).collect()
+
+
+def save_correction(session, question, bad_sql, corrected_sql, reason="", bad_values=None):
+    """Save a correction so the LLM can learn from past mistakes."""
+    _ensure_corrections_table(session)
+    q = question.replace("'", "''")
+    bs = bad_sql.replace("'", "''")
+    cs = corrected_sql.replace("'", "''")
+    r = reason.replace("'", "''")
+    bv = ", ".join(bad_values) if bad_values else ""
+    bv = bv.replace("'", "''")
+    session.sql(f"""
+        INSERT INTO {_CORRECTIONS_TABLE} (QUESTION, BAD_SQL, CORRECTED_SQL, REASON, BAD_VALUES)
+        VALUES ('{q}', '{bs}', '{cs}', '{r}', '{bv}')
+    """).collect()
+
+
+def get_relevant_corrections(session, question, limit=3):
+    """Fetch past corrections relevant to the current question."""
+    _ensure_corrections_table(session)
+    q = question.replace("'", "''")
+    try:
+        rows = session.sql(f"""
+            SELECT QUESTION, BAD_SQL, CORRECTED_SQL, REASON, BAD_VALUES
+            FROM {_CORRECTIONS_TABLE}
+            WHERE QUESTION ILIKE '%' || '{q}' || '%'
+               OR '{q}' ILIKE '%' || QUESTION || '%'
+               OR ARRAY_SIZE(SPLIT('{q}', ' ')) > 0
+            ORDER BY CREATED_AT DESC
+            LIMIT {limit}
+        """).collect()
+        # If broad match returns nothing useful, get most recent corrections
+        if not rows:
+            rows = session.sql(f"""
+                SELECT QUESTION, BAD_SQL, CORRECTED_SQL, REASON, BAD_VALUES
+                FROM {_CORRECTIONS_TABLE}
+                ORDER BY CREATED_AT DESC
+                LIMIT {limit}
+            """).collect()
+        return rows
+    except Exception:
+        return []
 
 
 # ── Query Execution ───────────────────────────────────────────────────────────

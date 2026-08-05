@@ -19,7 +19,7 @@ SEMANTIC_VIEWS = {
 }
 
 
-def build_router_and_sql_prompt(question, schema_context, history=None):
+def build_router_and_sql_prompt(question, schema_context, history=None, corrections=None):
     """Single prompt that routes to a semantic view OR generates SQL directly."""
     view_list = "\n".join([f"- {v}: {desc}" for v, desc in SEMANTIC_VIEWS.items()])
     history_block = ""
@@ -28,12 +28,26 @@ def build_router_and_sql_prompt(question, schema_context, history=None):
         for h in history[-2:]:
             history_lines.append(f"Previous Q: {h['question']}\nPrevious SQL: {h['sql']}")
         history_block = f"\n## Prior Conversation Context\n" + "\n\n".join(history_lines) + "\n"
+
+    corrections_block = ""
+    if corrections:
+        corr_lines = []
+        for c in corrections:
+            corr_lines.append(
+                f"- Question: {c['QUESTION']}\n"
+                f"  Wrong SQL: {c['BAD_SQL'][:200]}\n"
+                f"  Correct SQL: {c['CORRECTED_SQL'][:200]}\n"
+                f"  Reason: {c['REASON']}"
+            )
+        corrections_block = "\n## Known Corrections (learn from past mistakes — do NOT repeat these errors)\n" + "\n".join(corr_lines) + "\n"
+
     return f"""You are a Snowflake BI query router and SQL generator. Given a user question, first decide if it can be answered from a pre-built semantic view. If yes (with high confidence), return the view name. Otherwise, generate SQL.
-{history_block}
+{history_block}{corrections_block}
 ## Available Semantic Views
 {view_list}
 
 ## Database Schema (live — use ONLY these tables and columns)
+Note: Columns with "-- Values:" annotations show the ONLY valid values for that column. Do NOT use any other values in WHERE/CASE clauses for those columns.
 {schema_context}
 
 ## Rules for SQL Generation
@@ -50,6 +64,7 @@ def build_router_and_sql_prompt(question, schema_context, history=None):
 - Use fully qualified table names exactly as shown in the schema.
 - Do NOT use SELECT *. Always specify columns explicitly.
 - Do NOT invent table or column names outside the schema above.
+- Do NOT invent column values. Use ONLY the values listed in the "-- Values:" annotations.
 - Do NOT generate DDL or DML (no DROP, INSERT, UPDATE, DELETE, ALTER, TRUNCATE, GRANT, MERGE).
 - Use ORDER BY + LIMIT for "top N" questions.
 - Use SUM/AVG/COUNT for aggregation questions.
