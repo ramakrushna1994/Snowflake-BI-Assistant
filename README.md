@@ -8,7 +8,7 @@ A natural language BI assistant powered by Snowflake Cortex. Ask business questi
 
 ## Features
 
-- **Natural Language to SQL** — Powered by Snowflake Cortex (`mistral-large2`)
+- **Natural Language to SQL** — Powered by Snowflake Cortex (`llama3.3-70b`)
 - **Single-Call Generation** — One LLM call produces the query and reports which semantic view (if any) it drew from
 - **Semantic View Preference** — 13 pre-aggregated, fan-out-safe views the model queries directly when one fits, so common questions avoid multi-table joins — while still applying the filters, ordering, and limits the question asked for
 - **Live Schema Metadata** — Tables *and* views fetched dynamically from `INFORMATION_SCHEMA` at runtime; handles schema evolution and drift automatically
@@ -131,21 +131,25 @@ This project is a competition demo. Before using in production:
 
 ### Prerequisites
 - Snowflake account with ACCOUNTADMIN role
-- Cortex LLM access (`mistral-large2` must be available in your region)
+- Cortex LLM access (`llama3.3-70b` must be available in your region)
 
 **Verify Cortex availability** — run this in a Snowsight worksheet:
 
 ```sql
-SELECT SNOWFLAKE.CORTEX.COMPLETE('mistral-large2', 'ping');
+SELECT SNOWFLAKE.CORTEX.COMPLETE('llama3.3-70b', 'ping');
 ```
 
 If it returns a response, you're good. If you get an error (model unavailable in your region), change the model constant in `app/prompts.py`:
 
 ```python
-CORTEX_MODEL = "llama3.1-70b"  # fallback if mistral-large2 is unavailable
+CORTEX_MODEL = "mistral-large2"  # fallback if llama3.3-70b is unavailable
 ```
 
-Other supported fallback models: `llama3.1-8b`, `mistral-7b`, `gemma-7b`. Check [Cortex LLM availability](https://docs.snowflake.com/en/user-guide/snowflake-cortex/llm-functions#availability) for your region.
+Other supported fallback models: `llama3.1-70b`, `llama3.1-8b`, `mistral-7b`, `gemma-7b`. Check [Cortex LLM availability](https://docs.snowflake.com/en/user-guide/snowflake-cortex/llm-functions#availability) for your region.
+
+> The model must reliably return the JSON contract `{"sql": ..., "view": ...}`. Smaller
+> fallbacks (`llama3.1-8b`, `mistral-7b`, `gemma-7b`) are more likely to drift into prose;
+> the parser recovers bare SQL, but the semantic-view badge will stop appearing.
 
 ### Step 1 — Run Setup Scripts (in order)
 
@@ -262,7 +266,7 @@ This project uses **GitHub Actions** for automated deployments to Snowflake.
 | Layer | Technology |
 |-------|-----------|
 | Database | Snowflake |
-| LLM | Snowflake Cortex (`mistral-large2`) |
+| LLM | Snowflake Cortex (`llama3.3-70b`) |
 | UI | Streamlit in Snowflake |
 | CI/CD | GitHub Actions + Snow CLI |
 | Schema Discovery | `INFORMATION_SCHEMA.COLUMNS` |
@@ -296,6 +300,6 @@ Snowflake-BI-Assistant/
 │   ├── 05_expand_sales.sql     # High-volume Sales data
 │   ├── 06_expand_hr.sql        # Expanded HR + Payroll
 │   ├── 07_finance_schema.sql   # Finance schema
-│   └── 08_semantic_views.sql   # 11 semantic views
+│   └── 08_semantic_views.sql   # 13 semantic views
 └── README.md
 ```
