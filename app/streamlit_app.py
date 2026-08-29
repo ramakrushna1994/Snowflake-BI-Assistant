@@ -8,7 +8,7 @@ from prompts import SEMANTIC_VIEWS, build_summary_prompt
 from query_engine import (
     get_live_schema, generate_sql, repair_sql, validate_sql, ensure_limit,
     score_sql, run_query, check_value_compliance, complete,
-    save_correction, get_relevant_corrections,
+    save_correction, get_relevant_corrections, format_sql,
 )
 
 # ── Page Config & Theme ──────────────────────────────────────────────────────
@@ -219,6 +219,9 @@ def load_schema():
         st.session_state["known_identifiers"] = known_ids
         st.session_state["enum_hints"] = enum_hints
         st.session_state["data_year_range"] = data_year_range
+    elif "data_year_range" not in st.session_state:
+        from query_engine import get_data_year_range
+        st.session_state["data_year_range"] = get_data_year_range(session)
 
 
 # ── Chart Builder ────────────────────────────────────────────────────────────
@@ -465,7 +468,7 @@ def process_question(question):
                 st.info("No chart available for this result shape.")
 
     with tab_sql:
-        st.code(final_sql, language="sql")
+        st.code(format_sql(final_sql), language="sql")
 
     with tab_quality:
         render_confidence(scores)
