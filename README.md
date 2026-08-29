@@ -1,5 +1,7 @@
 # DataForge — Conversational BI Assistant
 
+> Built for **Coco Quest** — Snowflake Northstar Event, Bhubaneswar, 2026
+
 A natural language BI assistant powered by Snowflake Cortex. Ask business questions in plain English and get SQL-generated results with confidence scoring, charts, and AI summaries — all running natively inside Snowflake.
 
 ---
@@ -7,17 +9,28 @@ A natural language BI assistant powered by Snowflake Cortex. Ask business questi
 ## Features
 
 - **Natural Language to SQL** — Powered by Snowflake Cortex (`mistral-large2`)
-- **Single-Call Routing** — One LLM call decides whether to route to a semantic view (with HIGH/LOW confidence) or generate SQL directly
-- **Semantic View Routing** — 11 pre-aggregated views for instant answers on common questions (no SQL generation needed)
-- **Live Schema Metadata** — Schema fetched dynamically from `INFORMATION_SCHEMA` at runtime; handles schema evolution and drift automatically
-- **SQL Safety Guardrails** — Generated SQL is validated to be SELECT-only; DDL/DML keywords (DROP, DELETE, INSERT, ALTER, etc.) are blocked before execution
-- **Row Limiting** — Automatically appends `LIMIT 500` to generated queries missing an explicit limit
+- **Single-Call Generation** — One LLM call produces the query and reports which semantic view (if any) it drew from
+- **Semantic View Preference** — 13 pre-aggregated, fan-out-safe views the model queries directly when one fits, so common questions avoid multi-table joins — while still applying the filters, ordering, and limits the question asked for
+- **Live Schema Metadata** — Tables *and* views fetched dynamically from `INFORMATION_SCHEMA` at runtime; handles schema evolution and drift automatically
+- **SQL Safety Guardrails** — Generated SQL is validated to be a single SELECT; DDL/DML keywords (DROP, DELETE, INSERT, ALTER, etc.) are blocked before execution. String literals are excluded from the scan, so legitimate values like `'Needs update'` aren't misread as commands
+- **Row Limiting** — Appends `LIMIT 500` unless the query already ends with a row cap (a `LIMIT` inside a CTE caps the CTE, not the result)
+- **Self-Repair** — If Snowflake rejects the generated SQL, the error is fed back for a single repair attempt, re-validated, and retried
 - **Confidence Scoring** — Every generated SQL is scored on Relevance (LLM), Schema Compliance (code-verified against live schema), and SQL Quality (LLM) with a GOOD / NEEDS REVIEW / RISKY verdict
 - **Prompt Injection Defense** — User questions are wrapped in delimiters with explicit instructions to treat content as data, not commands; question display uses `st.write` to prevent markdown injection in the UI
 - **Auto Charts** — Bar and line charts rendered automatically for numeric results; failures surface a user-visible message instead of silently passing
 - **AI Summaries** — Grounded business summaries that only state facts supported by the result data
 - **Session Caching** — Snowpark session and schema metadata are cached in `st.session_state` to avoid redundant round-trips
 - **Streamlit in Snowflake** — No external hosting required; runs entirely inside your Snowflake account
+
+---
+
+## Screenshots
+
+| Ask a question | SQL + Confidence Score | Chart Output |
+|---|---|---|
+| *(add screenshot)* | *(add screenshot)* | *(add screenshot)* |
+
+> To add screenshots: run the app in Snowsight, capture the three key screens, and drop them into `docs/screenshots/`. Then replace the cells above with `![description](docs/screenshots/filename.png)`.
 
 ---
 
@@ -60,7 +73,7 @@ A natural language BI assistant powered by Snowflake Cortex. Ask business questi
 
 ## Semantic Views
 
-Pre-aggregated views that bypass SQL generation for common question patterns:
+Pre-aggregated, fan-out-safe views the generator prefers when one fits the question:
 
 | View | Answers |
 |------|---------|
@@ -75,6 +88,8 @@ Pre-aggregated views that bypass SQL generation for common question patterns:
 | `FINANCE.V_BUDGET_VS_ACTUAL` | Budget vs actual spend, variance by dept/month |
 | `FINANCE.V_EXPENSE_SUMMARY` | Expenses by category, vendor, approval rate |
 | `FINANCE.V_INVOICE_AGING` | Outstanding invoices, aging buckets, days to pay |
+| `SALES.V_INVENTORY_STATUS` | Stock levels, low-stock alerts, reorder status by product/store |
+| `SALES.V_STORE_PERFORMANCE` | Revenue and orders by store, AOV, unique customers per store |
 
 ### Data Correctness & Design Notes
 
@@ -96,6 +111,19 @@ The semantic views and seed scripts follow two rules that protect metric accurac
   `ORDER_ITEMS.LINE_TOTAL = QTY × PRICE × (1 − discount)`,
   `INVOICES.TOTAL_DUE = INVOICE_AMOUNT + TAX_AMOUNT`, and `PAID_AMOUNT`/status/payment-date
   are mutually consistent (no negative balances or overpayments).
+
+---
+
+## Production Considerations
+
+This project is a competition demo. Before using in production:
+
+- **Authentication**: Add Snowflake OAuth or SSO; the current build uses session-level credentials
+- **Rate limiting**: Cortex LLM calls are unbounded — add per-user quotas to control cost
+- **Cost controls**: `LIMIT 500` guards against runaway row scans, but large semantic view queries can still be expensive; add warehouse auto-suspend (60s idle) and set a statement timeout
+- **Schema isolation**: Semantic views hard-code schema names (`SALES`, `HR`, `FINANCE`) — parameterize for multi-tenant or multi-environment deployments
+- **Prompt injection**: Delimiter-based defense is a first layer; add server-side input validation and length limits for production traffic
+- **Monitoring**: Wire Cortex usage logs to Snowflake `QUERY_HISTORY` for per-user cost attribution; set up a spend alert in Snowflake Resource Monitors
 
 ---
 
@@ -249,6 +277,7 @@ This project uses **GitHub Actions** for automated deployments to Snowflake.
 Snowflake-BI-Assistant/
 ├── .github/
 │   └── workflows/
+│       ├── tests.yml            # CI: offline unit tests (no Snowflake, no credits)
 │       ├── deploy-streamlit.yml  # CI/CD: auto-deploy app on push to main
 │       └── deploy-setup.yml      # CI/CD: run changed SQL scripts (with approval)
 ├── app/
@@ -256,6 +285,9 @@ Snowflake-BI-Assistant/
 │   ├── prompts.py              # All prompt-builder functions
 │   ├── query_engine.py         # Schema fetch, SQL gen, validation, scoring, execution
 │   └── snowflake.yml           # Snow CLI deployment config
+├── tests/
+│   └── test_query_engine.py    # Offline tests for guardrails + response parsing
+├── sample_questions.txt        # 100 complex analytical questions for evaluation
 ├── setup/
 │   ├── 01_create_database.sql  # Database, schemas, warehouse
 │   ├── 02_sales_data.sql       # Initial Sales tables

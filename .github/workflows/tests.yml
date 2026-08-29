@@ -1,0 +1,28 @@
+name: Tests
+
+# Offline unit tests for the SQL guardrails and response parsing.
+# No Snowflake connection and no Cortex calls — these cost nothing to run.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install test dependencies
+        run: pip install pandas
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
