@@ -550,3 +550,49 @@ def run_query(session, sql):
         return pd.DataFrame(session.sql(sql).collect()), None
     except Exception as e:
         return None, str(e)
+
+
+# ── SQL Formatting (display only) ────────────────────────────────────────────
+
+_FORMAT_KEYWORDS = re.compile(
+    r'\b(SELECT|FROM|WHERE|GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|OFFSET|'
+    r'LEFT\s+JOIN|RIGHT\s+JOIN|FULL\s+JOIN|CROSS\s+JOIN|INNER\s+JOIN|JOIN|'
+    r'ON|AND|OR|UNION\s+ALL|UNION|EXCEPT|INTERSECT|WITH|AS\s*\(|'
+    r'CASE|WHEN|THEN|ELSE|END|FETCH\s+FIRST)\b',
+    re.IGNORECASE,
+)
+
+_INDENT_KEYWORDS = {
+    'SELECT', 'FROM', 'WHERE', 'GROUP BY', 'ORDER BY', 'HAVING',
+    'LIMIT', 'OFFSET', 'UNION ALL', 'UNION', 'EXCEPT', 'INTERSECT',
+    'FETCH FIRST', 'WITH',
+}
+_SUB_INDENT_KEYWORDS = {
+    'LEFT JOIN', 'RIGHT JOIN', 'FULL JOIN', 'CROSS JOIN', 'INNER JOIN',
+    'JOIN', 'ON', 'AND', 'OR', 'WHEN', 'THEN', 'ELSE', 'END',
+}
+
+
+def format_sql(sql):
+    """Best-effort SQL formatting for display. Not used in execution."""
+    if not sql:
+        return sql
+    # Normalise whitespace
+    s = ' '.join(sql.split())
+    parts = _FORMAT_KEYWORDS.split(s)
+    lines = []
+    for part in parts:
+        token = part.strip()
+        if not token:
+            continue
+        upper = ' '.join(token.upper().split())
+        if upper in _INDENT_KEYWORDS:
+            lines.append(token.upper())
+        elif upper in _SUB_INDENT_KEYWORDS:
+            lines.append('  ' + token.upper())
+        else:
+            if lines:
+                lines[-1] += ' ' + token
+            else:
+                lines.append(token)
+    return '\n'.join(lines)
