@@ -45,7 +45,7 @@ def get_enum_hints(session):
                 f"SELECT DISTINCT {column} FROM CONVERSATIONAL_BI.{schema}.{table} "
                 f"WHERE {column} IS NOT NULL ORDER BY {column} LIMIT 15"
             ).collect()
-            values = [r[column] for r in rows]
+            values = [str(r[column]) for r in rows]
             if values:
                 enum_hints[f"{schema}.{table}.{column}"] = values
         except Exception as e:
@@ -55,10 +55,27 @@ def get_enum_hints(session):
     return enum_hints
 
 
+def get_data_year_range(session):
+    """Return (min_year, max_year) across key date/year columns, or None if unavailable."""
+    try:
+        row = session.sql("""
+            SELECT MIN(y) AS MIN_YEAR, MAX(y) AS MAX_YEAR FROM (
+                SELECT BUDGET_YEAR AS y FROM CONVERSATIONAL_BI.FINANCE.BUDGET_LINES
+                UNION ALL
+                SELECT YEAR(ORDER_DATE) FROM CONVERSATIONAL_BI.SALES.ORDERS
+            )
+        """).collect()
+        if row:
+            return int(row[0]["MIN_YEAR"]), int(row[0]["MAX_YEAR"])
+    except Exception as e:
+        logger.warning("data year range detection failed: %s", e)
+    return None
+
+
 def get_live_schema(session):
     """Fetch schema metadata once.
 
-    Returns (schema_text, views_text, schema_df, known_identifiers, enum_hints).
+    Returns (schema_text, views_text, schema_df, known_identifiers, enum_hints, data_year_range).
 
     Views are fetched alongside base tables so the model can write targeted SQL
     against a semantic view (not just SELECT *), and so view columns count as
@@ -109,7 +126,8 @@ def get_live_schema(session):
         return "\n".join(lines)
 
     schema_df = pd.DataFrame(rows)
-    return _render(tables), _render(views), schema_df, known_identifiers, enum_hints
+    data_year_range = get_data_year_range(session)
+    return _render(tables), _render(views), schema_df, known_identifiers, enum_hints, data_year_range
 
 
 # ── SQL Validation ────────────────────────────────────────────────────────────
@@ -240,7 +258,8 @@ def parse_sql_response(raw, semantic_views):
 
 
 def generate_sql(session, question, schema_context, semantic_views,
-                 views_context="", history=None, corrections=None):
+                 views_context="", history=None, corrections=None,
+                 data_max_year=None):
     """Single LLM call producing SQL, optionally sourced from a semantic view.
 
     Returns dict: {"sql": str, "view": str|None, "error": str|None}
@@ -250,6 +269,7 @@ def generate_sql(session, question, schema_context, semantic_views,
     prompt = build_router_and_sql_prompt(
         question, schema_context, views_context=views_context,
         history=history, corrections=corrections,
+        data_max_year=data_max_year,
     )
     return parse_sql_response(complete(session, prompt), semantic_views)
 

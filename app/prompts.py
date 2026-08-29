@@ -19,7 +19,7 @@ SEMANTIC_VIEWS = {
 }
 
 
-def build_router_and_sql_prompt(question, schema_context, views_context="", history=None, corrections=None):
+def build_router_and_sql_prompt(question, schema_context, views_context="", history=None, corrections=None, data_max_year=None):
     """Single prompt: always produce SQL, optionally sourced from a semantic view."""
     view_list = "\n".join([f"- {v}: {desc}" for v, desc in SEMANTIC_VIEWS.items()])
     history_block = ""
@@ -46,8 +46,17 @@ def build_router_and_sql_prompt(question, schema_context, views_context="", hist
 {views_context}
 """ if views_context else ""
 
+    data_freshness_block = ""
+    if data_max_year:
+        data_freshness_block = f"""
+## Data Freshness
+The database contains data from {data_max_year[0]} to {data_max_year[1]}. The current calendar year is NOT in the data.
+For "this year", "year-to-date", "current year", or "YTD" questions, use {data_max_year[1]} as the year.
+NEVER use YEAR(CURRENT_DATE()) or CURRENT_DATE() to filter year columns — it will match zero rows.
+"""
+
     return f"""You are a Snowflake BI SQL generator. Given a user question, always write a SQL query that answers it. Prefer a pre-built semantic view when one fits, because those views are pre-aggregated and avoid join fan-out.
-{history_block}{corrections_block}
+{history_block}{corrections_block}{data_freshness_block}
 ## Available Semantic Views
 {view_list}
 {views_block}
@@ -77,7 +86,7 @@ Note: Columns with "-- Values:" annotations show the ONLY valid values for that 
 - Use SUM/AVG/COUNT for aggregation questions.
 - For relative time references like "last month", use DATEADD(MONTH, -1, CURRENT_DATE()).
 - For "last N days", use WHERE col >= DATEADD(DAY, -N, CURRENT_DATE()).
-- For "this year", use WHERE YEAR(col) = YEAR(CURRENT_DATE()).
+- IMPORTANT: The data may NOT cover the current calendar year. When columns have "-- Values:" annotations listing specific years, use ONLY those years. For "this year" or "year-to-date", use the MAX year from the "-- Values:" annotation (e.g., if BUDGET_YEAR shows Values: 2024, 2025, then "this year" means BUDGET_YEAR = 2025). NEVER use YEAR(CURRENT_DATE()) on year columns — it will return no results if the current year has no data.
 
 ## Few-Shot Examples
 
@@ -89,6 +98,9 @@ Answer: {{"sql": "SELECT FIRST_NAME, LAST_NAME, SALARY FROM CONVERSATIONAL_BI.HR
 
 Q: Monthly revenue trend for last 6 months?
 Answer: {{"sql": "SELECT MONTH_LABEL, NET_REVENUE, TOTAL_ORDERS FROM CONVERSATIONAL_BI.SALES.V_MONTHLY_REVENUE WHERE REVENUE_MONTH >= DATEADD(MONTH, -6, CURRENT_DATE()) ORDER BY REVENUE_MONTH", "view": "CONVERSATIONAL_BI.SALES.V_MONTHLY_REVENUE"}}
+
+Q: Which departments are more than 10% over budget year-to-date?
+Answer: {{"sql": "SELECT DEPT_NAME, SUM(BUDGET_AMOUNT) AS YTD_BUDGET, SUM(ACTUAL_AMOUNT) AS YTD_ACTUAL, ROUND((SUM(ACTUAL_AMOUNT) - SUM(BUDGET_AMOUNT)) / NULLIF(SUM(BUDGET_AMOUNT), 0) * 100, 2) AS PCT_OVER FROM CONVERSATIONAL_BI.FINANCE.V_BUDGET_VS_ACTUAL WHERE BUDGET_YEAR = (SELECT MAX(BUDGET_YEAR) FROM CONVERSATIONAL_BI.FINANCE.V_BUDGET_VS_ACTUAL) GROUP BY DEPT_NAME HAVING PCT_OVER > 10 ORDER BY PCT_OVER DESC", "view": "CONVERSATIONAL_BI.FINANCE.V_BUDGET_VS_ACTUAL"}}
 
 ## User Question
 <<<{question}>>>
