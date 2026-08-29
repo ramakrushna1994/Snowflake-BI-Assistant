@@ -13,3 +13,8 @@ entities:
       - streamlit_app.py
       - prompts.py
       - query_engine.py
+      - environment.yml   # declares plotly for the SiS runtime — must reach the stage
+    imports:
+      - "@CONVERSATIONAL_BI.APP.STREAMLIT_STAGE"
+    packages:
+      - plotly

@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -34,7 +34,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Snow CLI
         run: pip install snowflake-cli
@@ -57,7 +57,9 @@ jobs:
         run: |
           set -e
           cd app
-          for file in streamlit_app.py prompts.py query_engine.py; do
+          # environment.yml declares plotly for the SiS runtime — without it on
+          # the stage a fresh deploy fails at `import plotly.express`.
+          for file in streamlit_app.py prompts.py query_engine.py environment.yml; do
             echo "▶ Uploading $file ..."
             snow stage copy "$file" @CONVERSATIONAL_BI.APP.STREAMLIT_STAGE \
               --overwrite --connection default
