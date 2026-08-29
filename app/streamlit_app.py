@@ -1,12 +1,11 @@
 import streamlit as st
 from snowflake.snowpark.context import get_active_session
 import pandas as pd
-import re
 
-from prompts import SEMANTIC_VIEWS, CORTEX_MODEL, build_summary_prompt
+from prompts import SEMANTIC_VIEWS, build_summary_prompt
 from query_engine import (
-    get_live_schema, generate_sql, validate_sql, ensure_limit,
-    score_sql, run_query, check_value_compliance,
+    get_live_schema, generate_sql, repair_sql, validate_sql, ensure_limit,
+    score_sql, run_query, check_value_compliance, complete,
     save_correction, get_relevant_corrections,
 )
 
@@ -48,9 +47,10 @@ with st.sidebar:
 
     st.divider()
     if st.button("Refresh Schema"):
-        for key in ["schema_context", "schema_table", "known_identifiers", "enum_hints", "history", "errors", "session"]:
+        for key in ["schema_context", "views_context", "schema_table", "known_identifiers",
+                    "enum_hints", "history", "errors", "session"]:
             st.session_state.pop(key, None)
-        st.experimental_rerun()
+        st.rerun()
     if "schema_table" in st.session_state:
         st.dataframe(st.session_state["schema_table"], use_container_width=True)
 
@@ -151,8 +151,9 @@ if ask_clicked and question.strip():
     if "schema_context" not in st.session_state:
         with st.spinner("Loading live schema..."):
             try:
-                schema_text, schema_df, known_ids, enum_hints = get_live_schema(session)
+                schema_text, views_text, schema_df, known_ids, enum_hints = get_live_schema(session)
                 st.session_state["schema_context"] = schema_text
+                st.session_state["views_context"] = views_text
                 st.session_state["schema_table"] = schema_df
                 st.session_state["known_identifiers"] = known_ids
                 st.session_state["enum_hints"] = enum_hints
@@ -161,6 +162,7 @@ if ask_clicked and question.strip():
                 st.stop()
 
     schema_context = st.session_state["schema_context"]
+    views_context = st.session_state.get("views_context", "")
     known_identifiers = st.session_state["known_identifiers"]
 
     if not schema_context.strip():
@@ -180,83 +182,88 @@ if ask_clicked and question.strip():
     st.markdown("---")
     st.markdown(f"**Q:** {question}")
 
-    # Step 1: Single LLM call — route to semantic view or generate SQL
+    # Step 1: Single LLM call — always produces SQL, optionally sourced from a view
     # Fetch relevant corrections to inject into prompt
     corrections = get_relevant_corrections(session, question)
     try:
         with st.spinner("Generating query..."):
-            result = generate_sql(session, question, schema_context, SEMANTIC_VIEWS, history=history, corrections=corrections)
+            result = generate_sql(
+                session, question, schema_context, SEMANTIC_VIEWS,
+                views_context=views_context, history=history, corrections=corrections,
+            )
     except Exception as e:
         st.session_state.setdefault("errors", []).append(f"generate_sql: {e}")
         st.error(f"Query generation error: {e}")
         st.stop()
 
-    if result.get("error") and result["type"] == "sql" and not result["value"]:
-        st.error(f"Could not generate a query: {result['error']}")
+    if not result.get("sql"):
+        st.error(f"Could not generate a query: {result.get('error') or 'empty response'}")
         st.stop()
 
-    scores = {}  # populated by generated SQL path; empty for view path
+    if result.get("view"):
+        st.info(f"Answered from semantic view: `{result['view'].split('.')[-1]}`")
 
-    if result["type"] == "view":
-        view_name = result["value"]
-        st.info(f"Answered from semantic view: `{view_name.split('.')[-1]}`")
-        query_sql = f"SELECT * FROM {view_name} LIMIT 500"
-        final_sql = query_sql
-        with st.expander("Query", expanded=False):
-            st.code(query_sql, language="sql")
+    # SQL safety guardrail
+    is_valid, validation_error = validate_sql(result["sql"])
+    if not is_valid:
+        st.error(f"SQL blocked: {validation_error}")
+        st.stop()
 
-        # Views are curated and reviewed — always HIGH confidence on schema fit
-        st.markdown("#### Confidence Score")
-        st.success("✅ Confidence: HIGH — curated semantic view")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Relevance",   "10/10", help="Routed to a purpose-built view for this question type.")
-        c2.metric("Schema Fit",  "10/10", help="View is reviewed and maintained against the live schema.")
-        c3.metric("SQL Quality", "10/10", help="Pre-validated SQL — no generation risk.")
+    final_sql = ensure_limit(result["sql"])
+    with st.expander("Generated SQL", expanded=True):
+        st.code(final_sql, language="sql")
 
-        with st.spinner("Running query..."):
-            df, error = run_query(session, query_sql)
-        if error:
-            st.error(f"Query error: {error}")
-            st.stop()
-    else:
-        generated_sql = result["value"]
-        # Strip markdown fences if present
-        generated_sql = re.sub(r"```(?:sql)?", "", generated_sql).strip()
+    # Step 2: Execute, with one repair attempt if Snowflake rejects the query
+    with st.spinner("Running query..."):
+        df, error = run_query(session, final_sql)
 
-        # SQL safety guardrail
-        is_valid, validation_error = validate_sql(generated_sql)
-        if not is_valid:
-            st.error(f"SQL blocked: {validation_error}")
-            st.stop()
+    if error:
+        st.warning(f"First attempt failed: {error}")
+        with st.spinner("Repairing query..."):
+            try:
+                repair = repair_sql(
+                    session, question, final_sql, error,
+                    schema_context, SEMANTIC_VIEWS, views_context=views_context,
+                )
+            except Exception as e:
+                st.session_state.setdefault("errors", []).append(f"repair_sql: {e}")
+                repair = {"sql": "", "view": None, "error": str(e)}
 
-        # Ensure row limit
-        generated_sql = ensure_limit(generated_sql)
-        final_sql = generated_sql
+        repaired_sql = repair.get("sql")
+        if repaired_sql:
+            repair_valid, repair_error = validate_sql(repaired_sql)
+            if not repair_valid:
+                error = f"{error} — repair blocked: {repair_error}"
+            else:
+                repaired_sql = ensure_limit(repaired_sql)
+                st.caption("Retried with a repaired query:")
+                st.code(repaired_sql, language="sql")
+                with st.spinner("Running repaired query..."):
+                    retry_df, retry_error = run_query(session, repaired_sql)
+                if retry_error:
+                    error = f"{error} — repair also failed: {retry_error}"
+                else:
+                    df, error, final_sql = retry_df, None, repaired_sql
 
-        with st.expander("Generated SQL", expanded=True):
-            st.code(generated_sql, language="sql")
+    if error:
+        st.error(f"Query error: {error}")
+        st.stop()
 
-        # Confidence scoring — score_sql never raises, always returns a dict
-        scores = score_sql(session, question, generated_sql, known_identifiers)
-        # Add value compliance check
-        enum_hints = st.session_state.get("enum_hints", {})
-        val_score, val_reason, bad_vals = check_value_compliance(generated_sql, enum_hints)
-        scores["value_compliance"] = val_score
-        scores["value_compliance_reason"] = val_reason
-        scores["bad_values"] = bad_vals
-        # Downgrade verdict if value compliance is poor
-        if val_score < 5:
-            scores["verdict"] = "RISKY"
-        elif val_score < 8 and scores["verdict"] == "GOOD":
-            scores["verdict"] = "NEEDS REVIEW"
-        render_confidence(scores)
-
-        # Execute query
-        with st.spinner("Running query..."):
-            df, error = run_query(session, generated_sql)
-        if error:
-            st.error(f"Query error: {error}")
-            st.stop()
+    # Step 3: Score the SQL that actually ran
+    scores = score_sql(session, question, final_sql, known_identifiers)
+    enum_hints = st.session_state.get("enum_hints", {})
+    val_score, val_reason, bad_vals = check_value_compliance(final_sql, enum_hints)
+    scores["value_compliance"] = val_score
+    scores["value_compliance_reason"] = val_reason
+    scores["bad_values"] = bad_vals
+    # Downgrade verdict if value compliance is poor
+    if val_score < 5:
+        scores["verdict"] = "RISKY"
+    elif val_score < 8 and scores["verdict"] == "GOOD":
+        scores["verdict"] = "NEEDS REVIEW"
+    if scores.get("error"):
+        st.session_state.setdefault("errors", []).append(scores["error"])
+    render_confidence(scores)
 
     if df is None or df.empty:
         st.warning("Query returned no results.")
@@ -271,14 +278,7 @@ if ask_clicked and question.strip():
         with st.spinner("Generating summary..."):
             results_str = df.head(20).to_string(index=False)
             col_info = ", ".join(df.columns.tolist())
-            summary_prompt = build_summary_prompt(question, results_str, col_info=col_info)
-            sp_escaped = summary_prompt.replace("'", "''")
-            summary = session.sql(
-                f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{CORTEX_MODEL}', '{sp_escaped}') AS R"
-            ).collect()[0]["R"]
-            if not summary:
-                raise ValueError("Cortex returned an empty response for summary.")
-            summary = summary.strip()
+            summary = complete(session, build_summary_prompt(question, results_str, col_info=col_info))
             summary_text = summary
         st.markdown("#### Summary")
         st.markdown(summary)
@@ -312,7 +312,7 @@ if ask_clicked and question.strip():
         )
         if st.button("Save Correction", type="secondary", key="save_correction"):
             if corrected_sql.strip() and corrected_sql.strip() != final_sql.strip():
-                bad_vals_to_save = scores.get("bad_values", []) if result["type"] != "view" else []
+                bad_vals_to_save = scores.get("bad_values", [])
                 save_correction(
                     session, question, final_sql,
                     corrected_sql.strip(), correction_reason,

@@ -13,7 +13,22 @@ on:
         default: 'Manual redeploy'
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install test dependencies
+        run: pip install pandas
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
   deploy:
+    needs: test              # never ship app code with failing guardrail tests
     runs-on: ubuntu-latest
     environment: prod          # requires manual approval in prod environment
 

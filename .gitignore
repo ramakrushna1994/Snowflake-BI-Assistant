@@ -1,5 +1,6 @@
 # Local tool metadata
 .cortex/
+CLAUDE.md
 
 # Snow CLI build output
 app/output/

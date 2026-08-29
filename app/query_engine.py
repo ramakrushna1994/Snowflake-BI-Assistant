@@ -2,7 +2,10 @@
 
 import re
 import json
+import logging
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 # Columns known to be categorical (low-cardinality enums worth exposing to the LLM)
@@ -42,35 +45,42 @@ def get_enum_hints(session):
             values = [r[column] for r in rows]
             if values:
                 enum_hints[f"{schema}.{table}.{column}"] = values
-        except Exception:
-            pass
+        except Exception as e:
+            # A missing column/table just means no hints for it — keep going,
+            # but leave a trace so a systemic failure is diagnosable.
+            logger.warning("enum sampling failed for %s.%s.%s: %s", schema, table, column, e)
     return enum_hints
 
 
 def get_live_schema(session):
-    """Fetch schema metadata once. Returns (schema_text, schema_df, table_columns_set, enum_hints).
-    
-    table_columns_set is a set of uppercase "SCHEMA.TABLE.COLUMN" for compliance checking.
-    enum_hints is a dict mapping "SCHEMA.TABLE.COLUMN" to list of valid values.
+    """Fetch schema metadata once.
+
+    Returns (schema_text, views_text, schema_df, known_identifiers, enum_hints).
+
+    Views are fetched alongside base tables so the model can write targeted SQL
+    against a semantic view (not just SELECT *), and so view columns count as
+    known identifiers during compliance scoring.
     """
     rows = session.sql("""
-        SELECT c.TABLE_SCHEMA, c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE
+        SELECT c.TABLE_SCHEMA, c.TABLE_NAME, c.COLUMN_NAME, c.DATA_TYPE, t.TABLE_TYPE
         FROM CONVERSATIONAL_BI.INFORMATION_SCHEMA.COLUMNS c
         JOIN CONVERSATIONAL_BI.INFORMATION_SCHEMA.TABLES t
           ON c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME
         WHERE c.TABLE_SCHEMA IN ('SALES','HR','FINANCE')
-          AND t.TABLE_TYPE = 'BASE TABLE'
+          AND t.TABLE_TYPE IN ('BASE TABLE','VIEW')
         ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION
     """).collect()
 
     tables = {}
+    views = {}
     known_identifiers = set()
     for r in rows:
         schema = r['TABLE_SCHEMA']
         table = r['TABLE_NAME']
         column = r['COLUMN_NAME']
         fqn = f"CONVERSATIONAL_BI.{schema}.{table}"
-        tables.setdefault(fqn, []).append((column, r['DATA_TYPE'], f"{schema}.{table}.{column}"))
+        target = views if r['TABLE_TYPE'] == 'VIEW' else tables
+        target.setdefault(fqn, []).append((column, r['DATA_TYPE'], f"{schema}.{table}.{column}"))
         # Track identifiers for compliance checking
         known_identifiers.add(f"{schema}.{table}.{column}".upper())
         known_identifiers.add(f"CONVERSATIONAL_BI.{schema}.{table}.{column}".upper())
@@ -83,19 +93,20 @@ def get_live_schema(session):
     # Fetch enum hints
     enum_hints = get_enum_hints(session)
 
-    # Build schema text with enum annotations
-    lines = []
-    for tbl, cols in tables.items():
-        lines.append(tbl)
-        for col_name, data_type, fqcol in cols:
-            hint = ""
-            if fqcol in enum_hints:
-                vals = ", ".join(enum_hints[fqcol])
-                hint = f"  -- Values: {vals}"
-            lines.append(f"  - {col_name} ({data_type}){hint}")
-    schema_text = "\n".join(lines)
+    def _render(objects):
+        lines = []
+        for obj, cols in objects.items():
+            lines.append(obj)
+            for col_name, data_type, fqcol in cols:
+                hint = ""
+                if fqcol in enum_hints:
+                    vals = ", ".join(enum_hints[fqcol])
+                    hint = f"  -- Values: {vals}"
+                lines.append(f"  - {col_name} ({data_type}){hint}")
+        return "\n".join(lines)
+
     schema_df = pd.DataFrame(rows)
-    return schema_text, schema_df, known_identifiers, enum_hints
+    return _render(tables), _render(views), schema_df, known_identifiers, enum_hints
 
 
 # ── SQL Validation ────────────────────────────────────────────────────────────
@@ -113,83 +124,145 @@ def _strip_sql_comments(sql):
     return sql.strip()
 
 
+def _blank_string_literals(sql):
+    """Replace the *contents* of single-quoted literals with empty strings.
+
+    Keeps the quotes so statement structure is preserved, but prevents data from
+    being mistaken for SQL. Without this, a legitimate filter such as
+    WHERE RETURN_REASON = 'Needs update' trips the DDL/DML keyword guard.
+    """
+    return re.sub(r"'[^']*'", "''", sql)
+
+
 def validate_sql(sql):
     """Check that SQL is a safe SELECT. Returns (is_valid, error_message)."""
     cleaned = _strip_sql_comments(sql)
     if not cleaned.upper().startswith('SELECT') and not cleaned.upper().startswith('WITH'):
         return False, "Generated SQL must be a SELECT or WITH statement."
-    if _DANGEROUS_KEYWORDS.search(cleaned):
-        match = _DANGEROUS_KEYWORDS.search(cleaned)
+
+    # Scan for keywords only outside string literals — literals are data, not SQL.
+    scannable = _blank_string_literals(cleaned)
+
+    # Reject stacked statements (e.g. "SELECT 1; DROP TABLE T"). A single
+    # trailing semicolon is fine; anything after one is a second statement.
+    if ';' in scannable.rstrip().rstrip(';'):
+        return False, "Generated SQL must be a single statement."
+
+    match = _DANGEROUS_KEYWORDS.search(scannable)
+    if match:
         return False, f"Generated SQL contains forbidden keyword: {match.group(0).upper()}"
     return True, None
 
 
+# A row cap only applies if LIMIT/FETCH is the *last* clause. A LIMIT inside a
+# CTE or subquery caps that subquery, not the result set.
+_TRAILING_ROW_CAP = re.compile(
+    r'\b(?:LIMIT\s+\d+(?:\s+OFFSET\s+\d+)?'
+    r'|FETCH\s+(?:FIRST|NEXT)\s+\d+\s+ROWS?\s+ONLY)\s*$',
+    re.IGNORECASE
+)
+
+
 def ensure_limit(sql, max_rows=500):
-    """Append LIMIT 500 if no LIMIT clause exists."""
-    if not re.search(r'\bLIMIT\b', sql, re.IGNORECASE):
-        sql = sql.rstrip().rstrip(';')
-        sql += f"\nLIMIT {max_rows}"
-    return sql
+    """Append LIMIT if the query does not already end with a row cap."""
+    body = _strip_sql_comments(sql).rstrip().rstrip(';').rstrip()
+    if _TRAILING_ROW_CAP.search(body):
+        return sql
+    return sql.rstrip().rstrip(';').rstrip() + f"\nLIMIT {max_rows}"
 
 
 # ── SQL Generation (merged routing + generation) ──────────────────────────────
 
-def generate_sql(session, question, schema_context, semantic_views, history=None, corrections=None):
-    """Single LLM call: routes to semantic view or generates SQL.
-    
-    Returns dict: {"type": "view"|"sql", "value": str, "confidence": str|None, "error": str|None}
-    """
-    from prompts import build_router_and_sql_prompt, CORTEX_MODEL
+def sql_literal(value):
+    """Escape a Python string for embedding in a Snowflake string literal.
 
-    prompt = build_router_and_sql_prompt(question, schema_context, history=history, corrections=corrections)
-    prompt_escaped = prompt.replace("'", "''")
+    Doubling quotes alone is not enough: Snowflake also interprets backslash
+    escapes inside string literals, so a value containing \\' would otherwise
+    terminate the literal early. Backslashes must be escaped first.
+    """
+    return str(value).replace("\\", "\\\\").replace("'", "''")
+
+
+def complete(session, prompt):
+    """Send a prompt to Cortex COMPLETE and return the raw text response."""
+    from prompts import CORTEX_MODEL
+
     raw = session.sql(
-        f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{CORTEX_MODEL}', '{prompt_escaped}') AS R"
+        f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{CORTEX_MODEL}', '{sql_literal(prompt)}') AS R"
     ).collect()[0]["R"]
     if not raw:
         raise ValueError("Cortex returned an empty response.")
-    raw = raw.strip()
+    return raw.strip()
 
-    # Try to parse JSON response
+
+def _strip_markdown_fences(text):
+    """Remove ```sql / ``` fences the model sometimes wraps its answer in."""
+    return re.sub(r"```(?:sql|json)?", "", text).strip()
+
+
+def parse_sql_response(raw, semantic_views):
+    """Parse a {"sql": ..., "view": ...} response.
+
+    Returns dict: {"sql": str, "view": str|None, "error": str|None}
+    """
+    raw = _strip_markdown_fences(raw)
+
+    parsed = None
     try:
-        # Extract JSON from response (model might wrap it in text)
-        json_match = re.search(r'\{[^{}]*\}', raw)
-        if json_match:
-            parsed = json.loads(json_match.group())
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        # The model may wrap the JSON in prose — pull out the first object.
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group())
+            except json.JSONDecodeError:
+                parsed = None
+
+    if isinstance(parsed, dict) and parsed.get("sql"):
+        view = parsed.get("view")
+        if isinstance(view, str):
+            view = view.strip()
+            # Only trust a view name we actually publish.
+            view = view if view in semantic_views else None
         else:
-            parsed = json.loads(raw)
+            view = None
+        return {"sql": str(parsed["sql"]).strip(), "view": view, "error": None}
 
-        if "view" in parsed:
-            view_name = parsed["view"].strip()
-            confidence = parsed.get("confidence", "LOW").upper()
-            # Exact match: view must exist in registry
-            if view_name in semantic_views:
-                if confidence == "HIGH":
-                    return {"type": "view", "value": view_name, "confidence": "HIGH", "error": None}
-                else:
-                    # LOW confidence — fall through to use SQL if available
-                    pass
-        if "sql" in parsed:
-            return {"type": "sql", "value": parsed["sql"].strip(), "confidence": None, "error": None}
-    except (json.JSONDecodeError, KeyError):
-        pass
-
-    # Fallback: if response looks like raw SQL (no JSON), use it directly
+    # Fallback: the model returned bare SQL instead of JSON.
     if raw.upper().lstrip().startswith(("SELECT", "WITH")):
-        return {"type": "sql", "value": raw, "confidence": None, "error": None}
+        return {"sql": raw, "view": None, "error": None}
 
-    # Fallback: parse plain-text view response (e.g. "VIEW_NAME | HIGH" or "VIEW_NAME\nCONFIDENCE: HIGH")
-    lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
-    if lines:
-        view_candidate = lines[0].split("|")[0].strip()
-        confidence = "HIGH"
-        for line in lines:
-            if "LOW" in line.upper():
-                confidence = "LOW"
-        if view_candidate in semantic_views and confidence == "HIGH":
-            return {"type": "view", "value": view_candidate, "confidence": "HIGH", "error": None}
+    return {"sql": "", "view": None, "error": "Could not parse LLM response"}
 
-    return {"type": "sql", "value": raw, "confidence": None, "error": "Could not parse LLM response"}
+
+def generate_sql(session, question, schema_context, semantic_views,
+                 views_context="", history=None, corrections=None):
+    """Single LLM call producing SQL, optionally sourced from a semantic view.
+
+    Returns dict: {"sql": str, "view": str|None, "error": str|None}
+    """
+    from prompts import build_router_and_sql_prompt
+
+    prompt = build_router_and_sql_prompt(
+        question, schema_context, views_context=views_context,
+        history=history, corrections=corrections,
+    )
+    return parse_sql_response(complete(session, prompt), semantic_views)
+
+
+def repair_sql(session, question, failed_sql, error_message, schema_context,
+               semantic_views, views_context=""):
+    """One repair attempt after Snowflake rejected the generated SQL.
+
+    Returns the same shape as generate_sql.
+    """
+    from prompts import build_retry_prompt
+
+    prompt = build_retry_prompt(
+        question, failed_sql, error_message, schema_context, views_context=views_context
+    )
+    return parse_sql_response(complete(session, prompt), semantic_views)
 
 
 # ── Schema Compliance (code-verified) ─────────────────────────────────────────
@@ -256,7 +329,7 @@ def score_sql(session, question, sql, known_identifiers):
     """Score SQL: RELEVANCE and SQL_QUALITY via LLM, SCHEMA_COMPLIANCE via code.
     Never raises — always returns a populated dict even if the LLM call fails.
     """
-    from prompts import build_score_prompt, CORTEX_MODEL
+    from prompts import build_score_prompt
 
     # Code-verified schema compliance (never fails)
     compliance_score, compliance_reason = compute_schema_compliance(sql, known_identifiers)
@@ -266,18 +339,13 @@ def score_sql(session, question, sql, known_identifiers):
         "schema_compliance": compliance_score, "schema_compliance_reason": compliance_reason,
         "sql_quality": 0, "sql_quality_reason": "LLM scoring unavailable",
         "verdict": "NEEDS REVIEW", "raw": "",
-        "llm_scored": False,
+        "llm_scored": False, "error": None,
     }
 
     # LLM-scored subjective criteria — safe, never raises
     try:
-        prompt = build_score_prompt(question, sql)
-        prompt_escaped = prompt.replace("'", "''")
-        raw = session.sql(
-            f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{CORTEX_MODEL}', '{prompt_escaped}') AS R"
-        ).collect()[0]["R"]
+        raw = complete(session, build_score_prompt(question, sql))
         if raw:
-            raw = raw.strip()
             result["raw"] = raw
             result["llm_scored"] = True
             for line in raw.splitlines():
@@ -295,8 +363,10 @@ def score_sql(session, question, sql, known_identifiers):
                         m = re.match(r"VERDICT:\s*(GOOD|NEEDS REVIEW|RISKY)", line)
                         if m:
                             result["verdict"] = m.group(1)
-    except Exception:
-        pass  # partial result already set above; schema compliance still valid
+    except Exception as e:
+        # Partial result already set above; schema compliance is still valid.
+        # Record the cause so the sidebar can show why scoring degraded.
+        result["error"] = f"score_sql: {e}"
 
     # Override verdict based on schema compliance
     if compliance_score < 5:
@@ -320,52 +390,67 @@ def _extract_string_literals(sql):
     return re.findall(r"'([^']*)'", sql)
 
 
+# Literals are only worth validating when they are compared against a column we
+# have sampled values for. A literal in a THEN/AS/SELECT position is an output
+# label (e.g. CASE ... THEN '0-30') and must never be flagged.
+_EQUALITY_COMPARISON = re.compile(
+    r"(?:\w+\.)?(\w+)\s*(?:=|!=|<>)\s*'([^']*)'", re.IGNORECASE
+)
+_IN_COMPARISON = re.compile(
+    r"(?:\w+\.)?(\w+)\s+IN\s*\(([^)]*)\)", re.IGNORECASE
+)
+
+
 def check_value_compliance(sql, enum_hints):
-    """Check string literals in SQL against known enum values.
-    
+    """Check literals compared against known enum columns.
+
+    Only WHERE-style comparisons (col = 'x', col IN ('x','y')) are validated.
     Returns (score 1-10, reason, list_of_bad_values).
     """
-    literals = _extract_string_literals(sql)
-    if not literals:
-        return 10, "No string literals to validate", []
-
-    # Build a reverse lookup: value -> which columns accept it
-    value_to_columns = {}
-    all_known_values = set()
+    # Index sampled values by bare column name. The same column name can appear
+    # in several tables (e.g. STATUS), so accept a value valid for any of them.
+    values_by_column = {}
     for col_key, values in enum_hints.items():
+        col_name = col_key.split('.')[-1].upper()
+        bucket = values_by_column.setdefault(col_name, set())
         for v in values:
-            all_known_values.add(v.upper())
-            value_to_columns.setdefault(v.upper(), []).append(col_key)
+            bucket.add(v.upper())
 
-    # Check each literal
+    if not values_by_column:
+        return 10, "No sampled enum values available to validate against", []
+
+    cleaned = _strip_sql_comments(sql)
+
+    # Collect (column, literal) pairs actually being compared.
+    compared = []
+    for col, lit in _EQUALITY_COMPARISON.findall(cleaned):
+        compared.append((col.upper(), lit))
+    for col, in_list in _IN_COMPARISON.findall(cleaned):
+        for lit in _extract_string_literals(in_list):
+            compared.append((col.upper(), lit))
+
     bad_values = []
     checked = 0
-    for lit in literals:
-        # Skip date-like strings, numbers, wildcards
-        if re.match(r'^\d{4}[-/]\d{2}', lit):
-            continue
-        if re.match(r'^[\d.]+$', lit):
-            continue
-        if '%' in lit:
-            continue
-        # Only check if it looks like an enum value (short alpha string)
-        if len(lit) > 50 or lit.strip() == '':
-            continue
+    for col, lit in compared:
+        allowed = values_by_column.get(col)
+        if not allowed:
+            continue  # not a column we sampled — nothing to check against
+        if '%' in lit or lit.strip() == '':
+            continue  # LIKE-style pattern or empty
         checked += 1
-        if lit.upper() not in all_known_values:
+        if lit.upper() not in allowed:
             bad_values.append(lit)
 
     if checked == 0:
-        return 10, "No enum-like literals to validate", []
+        return 10, "No enum column comparisons to validate", []
 
     valid = checked - len(bad_values)
-    ratio = valid / checked
-    score = max(1, min(10, round(ratio * 10)))
+    score = max(1, min(10, round((valid / checked) * 10)))
 
     if bad_values:
-        reason = f"{valid}/{checked} literals valid; unrecognized: {', '.join(repr(v) for v in bad_values[:3])}"
+        reason = f"{valid}/{checked} filter values valid; unrecognized: {', '.join(repr(v) for v in bad_values[:3])}"
     else:
-        reason = f"All {checked} string literals match known enum values"
+        reason = f"All {checked} filter values match sampled column values"
     return score, reason, bad_values
 
 
@@ -392,12 +477,11 @@ def _ensure_corrections_table(session):
 def save_correction(session, question, bad_sql, corrected_sql, reason="", bad_values=None):
     """Save a correction so the LLM can learn from past mistakes."""
     _ensure_corrections_table(session)
-    q = question.replace("'", "''")
-    bs = bad_sql.replace("'", "''")
-    cs = corrected_sql.replace("'", "''")
-    r = reason.replace("'", "''")
-    bv = ", ".join(bad_values) if bad_values else ""
-    bv = bv.replace("'", "''")
+    q = sql_literal(question)
+    bs = sql_literal(bad_sql)
+    cs = sql_literal(corrected_sql)
+    r = sql_literal(reason)
+    bv = sql_literal(", ".join(bad_values) if bad_values else "")
     session.sql(f"""
         INSERT INTO {_CORRECTIONS_TABLE} (QUESTION, BAD_SQL, CORRECTED_SQL, REASON, BAD_VALUES)
         VALUES ('{q}', '{bs}', '{cs}', '{r}', '{bv}')
@@ -407,18 +491,21 @@ def save_correction(session, question, bad_sql, corrected_sql, reason="", bad_va
 def get_relevant_corrections(session, question, limit=3):
     """Fetch past corrections relevant to the current question."""
     _ensure_corrections_table(session)
-    q = question.replace("'", "''")
+    q = sql_literal(question)
     try:
+        # NB: this WHERE must stay genuinely restrictive. An earlier version
+        # ORed in `ARRAY_SIZE(SPLIT(q,' ')) > 0`, which is true for every
+        # non-empty question — the filter was a no-op and the fallback below
+        # was unreachable, so every question got the 3 newest corrections.
         rows = session.sql(f"""
             SELECT QUESTION, BAD_SQL, CORRECTED_SQL, REASON, BAD_VALUES
             FROM {_CORRECTIONS_TABLE}
             WHERE QUESTION ILIKE '%' || '{q}' || '%'
                OR '{q}' ILIKE '%' || QUESTION || '%'
-               OR ARRAY_SIZE(SPLIT('{q}', ' ')) > 0
             ORDER BY CREATED_AT DESC
             LIMIT {limit}
         """).collect()
-        # If broad match returns nothing useful, get most recent corrections
+        # No direct match — fall back to the most recent corrections
         if not rows:
             rows = session.sql(f"""
                 SELECT QUESTION, BAD_SQL, CORRECTED_SQL, REASON, BAD_VALUES
@@ -427,7 +514,8 @@ def get_relevant_corrections(session, question, limit=3):
                 LIMIT {limit}
             """).collect()
         return rows
-    except Exception:
+    except Exception as e:
+        logger.warning("correction lookup failed: %s", e)
         return []
 
 
