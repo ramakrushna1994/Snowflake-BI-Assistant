@@ -27,6 +27,18 @@ st.markdown("""
         padding: 1rem;
     }
 
+    /* User messages */
+    [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
+        background: linear-gradient(135deg, #1a1f2e 0%, #1e2640 100%);
+        border-left: 3px solid #29B5E8;
+    }
+
+    /* Assistant messages */
+    [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) {
+        background: linear-gradient(135deg, #151922 0%, #1a1f2e 100%);
+        border-left: 3px solid #4ECB71;
+    }
+
     /* Metric cards */
     [data-testid="stMetric"] {
         background: linear-gradient(135deg, #1a1f2e 0%, #252b3b 100%);
@@ -61,18 +73,66 @@ st.markdown("""
 
     /* Sidebar */
     section[data-testid="stSidebar"] {
-        background-color: #151922;
+        background: linear-gradient(180deg, #0d1117 0%, #151922 100%);
         border-right: 1px solid #2d3548;
     }
     section[data-testid="stSidebar"] h1 { font-size: 1.2rem; }
 
+    /* Sidebar buttons */
+    section[data-testid="stSidebar"] .stButton > button {
+        background-color: transparent;
+        border: 1px solid #2d3548;
+        color: #c9d1d9;
+        text-align: left;
+        font-size: 0.85rem;
+        transition: all 0.2s ease;
+    }
+    section[data-testid="stSidebar"] .stButton > button:hover {
+        background-color: #1a2332;
+        border-color: #29B5E8;
+        color: #29B5E8;
+    }
+
     /* Chat input */
     [data-testid="stChatInput"] textarea {
         border-radius: 12px !important;
+        border: 1px solid #2d3548 !important;
+        background-color: #151922 !important;
+    }
+    [data-testid="stChatInput"] textarea:focus {
+        border-color: #29B5E8 !important;
+        box-shadow: 0 0 0 1px #29B5E8 !important;
     }
 
     /* Plotly chart background */
     .js-plotly-plot .plotly .main-svg { background: transparent !important; }
+
+    /* Info/warning/error banners */
+    [data-testid="stAlert"] { border-radius: 8px; }
+
+    /* Dataframe */
+    [data-testid="stDataFrame"] {
+        border: 1px solid #2d3548;
+        border-radius: 8px;
+    }
+
+    /* Welcome header */
+    .welcome-header {
+        text-align: center;
+        padding: 3rem 1rem 2rem;
+        color: #c9d1d9;
+    }
+    .welcome-header h2 {
+        background: linear-gradient(135deg, #29B5E8, #4ECB71);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-size: 1.8rem;
+        margin-bottom: 0.5rem;
+    }
+    .welcome-header p {
+        color: #8b949e;
+        font-size: 1rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -81,39 +141,61 @@ st.markdown("""
 
 with st.sidebar:
     st.markdown("## ⚡ DataForge")
-    st.caption("Conversational BI — Sales · HR · Finance")
+    st.caption("Conversational BI powered by Snowflake Cortex")
     st.divider()
 
-    st.markdown("##### Quick Questions")
-    examples = [
-        "Monthly revenue trend for last 6 months?",
-        "Top 5 products by revenue?",
-        "Revenue by customer segment?",
-        "Which channel has highest order volume?",
-        "Average salary by department?",
-        "Monthly payroll cost by department?",
-        "Which departments are over budget?",
-        "Top expense categories this year?",
-        "Invoice aging — how much is overdue?",
-        "Return rate by product category?",
-        "Which products are running low on stock?",
-        "Which stores have the highest revenue this quarter?",
-    ]
-    for ex in examples:
-        if st.button(ex, key=f"ex_{ex}", use_container_width=True):
-            st.session_state["pending_question"] = ex
+    st.markdown("##### 💬 Quick Questions")
+
+    with st.expander("Sales & Revenue", expanded=True):
+        for ex in [
+            "Monthly revenue trend for last 6 months?",
+            "Top 5 products by revenue?",
+            "Revenue by customer segment?",
+            "Which channel has highest order volume?",
+            "Return rate by product category?",
+            "Which stores have the highest revenue this quarter?",
+        ]:
+            if st.button(ex, key=f"ex_{ex}", use_container_width=True):
+                st.session_state["pending_question"] = ex
+
+    with st.expander("HR & Payroll"):
+        for ex in [
+            "Average salary by department?",
+            "Monthly payroll cost by department?",
+            "Which products are running low on stock?",
+        ]:
+            if st.button(ex, key=f"ex_{ex}", use_container_width=True):
+                st.session_state["pending_question"] = ex
+
+    with st.expander("Finance & Budget"):
+        for ex in [
+            "Which departments are over budget?",
+            "Top expense categories this year?",
+            "Invoice aging — how much is overdue?",
+        ]:
+            if st.button(ex, key=f"ex_{ex}", use_container_width=True):
+                st.session_state["pending_question"] = ex
 
     st.divider()
-    st.markdown("##### Semantic Views")
-    for v in SEMANTIC_VIEWS:
-        st.caption(f"📊 {v.split('.')[-1]}")
+    with st.expander("📊 Semantic Views"):
+        for v in SEMANTIC_VIEWS:
+            schema_label = v.split('.')[1]
+            view_name = v.split('.')[-1].replace("V_", "").replace("_", " ").title()
+            st.caption(f"{'📈' if schema_label == 'SALES' else '👥' if schema_label == 'HR' else '💰'} {view_name}")
 
     st.divider()
-    if st.button("🔄 Refresh Schema", use_container_width=True):
-        for key in ["schema_context", "views_context", "schema_table",
-                     "known_identifiers", "enum_hints"]:
-            st.session_state.pop(key, None)
-        st.rerun()
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🔄 Refresh", use_container_width=True, help="Reload schema metadata"):
+            for key in ["schema_context", "views_context", "schema_table",
+                         "known_identifiers", "enum_hints", "data_year_range"]:
+                st.session_state.pop(key, None)
+            st.rerun()
+    with col2:
+        if st.button("🗑️ Clear Chat", use_container_width=True, help="Clear conversation"):
+            st.session_state["messages"] = []
+            st.session_state["history"] = []
+            st.rerun()
 
 
 # ── Session Init ─────────────────────────────────────────────────────────────
@@ -130,12 +212,13 @@ session = st.session_state["session"]
 
 def load_schema():
     if "schema_context" not in st.session_state:
-        schema_text, views_text, schema_df, known_ids, enum_hints = get_live_schema(session)
+        schema_text, views_text, schema_df, known_ids, enum_hints, data_year_range = get_live_schema(session)
         st.session_state["schema_context"] = schema_text
         st.session_state["views_context"] = views_text
         st.session_state["schema_table"] = schema_df
         st.session_state["known_identifiers"] = known_ids
         st.session_state["enum_hints"] = enum_hints
+        st.session_state["data_year_range"] = data_year_range
 
 
 # ── Chart Builder ────────────────────────────────────────────────────────────
@@ -292,12 +375,14 @@ def process_question(question):
 
     # Generate SQL
     corrections = get_relevant_corrections(session, question)
+    data_year_range = st.session_state.get("data_year_range")
     with st.spinner("Generating query..."):
         try:
             result = generate_sql(
                 session, question, schema_context, SEMANTIC_VIEWS,
                 views_context=views_context, history=history,
                 corrections=corrections,
+                data_max_year=data_year_range,
             )
         except Exception as e:
             st.error(f"Query generation error: {e}")
@@ -307,8 +392,6 @@ def process_question(question):
         st.error(f"Could not generate a query: {result.get('error') or 'empty response'}")
         return
 
-    if result.get("view"):
-        st.info(f"Answered from semantic view: `{result['view'].split('.')[-1]}`")
 
     is_valid, validation_error = validate_sql(result["sql"])
     if not is_valid:
@@ -357,24 +440,29 @@ def process_question(question):
     elif val_score < 8 and scores["verdict"] == "GOOD":
         scores["verdict"] = "NEEDS REVIEW"
 
-    if df is None or df.empty:
+    has_data = df is not None and not df.empty
+
+    if not has_data:
         st.warning("Query returned no results.")
-        return
 
-    # Tabbed results
-    tab_data, tab_chart, tab_sql, tab_quality = st.tabs([
-        "📊 Data", "📈 Chart", "🔍 SQL", "✅ Quality"
-    ])
+    # Tabbed results — always show SQL & Quality, even on empty results
+    if has_data:
+        tab_data, tab_chart, tab_sql, tab_quality = st.tabs([
+            "📊 Data", "📈 Chart", "🔍 SQL", "✅ Quality"
+        ])
+    else:
+        tab_sql, tab_quality = st.tabs(["🔍 SQL", "✅ Quality"])
 
-    with tab_data:
-        st.dataframe(df, use_container_width=True, height=min(len(df) * 38 + 50, 500))
+    if has_data:
+        with tab_data:
+            st.dataframe(df, use_container_width=True, height=min(len(df) * 38 + 50, 500))
 
-    with tab_chart:
-        fig = build_chart(df)
-        if fig:
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No chart available for this result shape.")
+        with tab_chart:
+            fig = build_chart(df)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No chart available for this result shape.")
 
     with tab_sql:
         st.code(final_sql, language="sql")
@@ -382,23 +470,24 @@ def process_question(question):
     with tab_quality:
         render_confidence(scores)
 
-    # Summary with streaming effect
-    st.markdown("---")
-    try:
-        results_str = df.head(20).to_string(index=False)
-        col_info = ", ".join(df.columns.tolist())
-        summary_prompt = build_summary_prompt(question, results_str, col_info=col_info)
-        summary_text = complete(session, summary_prompt)
-        st.markdown("#### Summary")
-        summary_container = st.empty()
-        displayed = ""
-        for i in range(0, len(summary_text), 3):
-            displayed = summary_text[:i + 3]
-            summary_container.markdown(displayed)
-        summary_container.markdown(summary_text)
-    except Exception as e:
-        summary_text = ""
-        st.caption(f"Summary unavailable: {e}")
+    # Summary with streaming effect (skip on empty results — saves a Cortex call)
+    summary_text = ""
+    if has_data:
+        st.markdown("---")
+        try:
+            results_str = df.head(20).to_string(index=False)
+            col_info = ", ".join(df.columns.tolist())
+            summary_prompt = build_summary_prompt(question, results_str, col_info=col_info)
+            summary_text = complete(session, summary_prompt)
+            st.markdown("#### Summary")
+            summary_container = st.empty()
+            displayed = ""
+            for i in range(0, len(summary_text), 3):
+                displayed = summary_text[:i + 3]
+                summary_container.markdown(displayed)
+            summary_container.markdown(summary_text)
+        except Exception as e:
+            st.caption(f"Summary unavailable: {e}")
 
     # Save to history
     st.session_state["history"].append({
@@ -429,13 +518,31 @@ def process_question(question):
 
 # ── Chat UI ──────────────────────────────────────────────────────────────────
 
+# Welcome screen when no messages
+if not st.session_state["messages"]:
+    st.markdown("""
+    <div class="welcome-header">
+        <h2>Welcome to DataForge</h2>
+        <p>Ask questions about your Sales, HR, and Finance data in plain English.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    cols = st.columns(3)
+    starters = [
+        ("📈", "Sales", "Monthly revenue trend for last 6 months?"),
+        ("👥", "HR", "Average salary by department?"),
+        ("💰", "Finance", "Which departments are over budget?"),
+    ]
+    for col, (icon, label, q) in zip(cols, starters):
+        with col:
+            if st.button(f"{icon} {label}\n{q}", key=f"welcome_{label}", use_container_width=True):
+                st.session_state["pending_question"] = q
+                st.rerun()
+
 # Display existing messages
 for msg in st.session_state["messages"]:
     with st.chat_message(msg["role"]):
-        if msg["role"] == "user":
-            st.markdown(msg["content"])
-        else:
-            st.markdown(msg["content"])
+        st.markdown(msg["content"])
 
 # Handle sidebar example click
 if "pending_question" in st.session_state:
